@@ -19,7 +19,7 @@
     "link": "bun link",
     "generate:schema": "bun scripts/schema-generate.ts",
     "generate:schema:path:local": "bun scripts/schema-local-path.ts",
-    "types": "bun tsc --noEmit",
+    "typecheck": "bun tsc --noEmit",
     "testify": "bun test tests/prod.test.ts"
   },
   "keywords": [
