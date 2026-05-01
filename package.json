@@ -1,5 +1,5 @@
 {
-  "name": "@dotlabs-hq/llm-proxy",
+  "name": "@dotlab-hq/llm-proxy",
   "version": "1.0.0",
   "description": "LLM Proxy server with OpenAI compatibility",
   "module": "src/index.ts",
