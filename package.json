@@ -11,6 +11,9 @@
     ".": "./src/index.ts",
     "./server": "./src/server.ts"
   },
+  "repository": {
+    "url": "https://github.com/dotlab-hq/llm-proxy"
+  },
   "scripts": {
     "start": "bun run src/server.ts",
     "dev": "bun run --hot src/server.ts",
