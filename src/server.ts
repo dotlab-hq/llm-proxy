@@ -8,22 +8,36 @@ import { rateLimitManager } from "./core/RateLimitManager";
 const app = new Hono()
 app.use(logger())
 
+// Auto-load cache/stats on startup
+let cachedStats: Record<string, any> = {};
+
+async function loadStats() {
+    try {
+        cachedStats = {};
+        
+        for (const config of CONFIG.models.openai) {
+            const usage = await rateLimitManager.getUsage(config.id);
+            if (usage) {
+                cachedStats[config.id] = {
+                    ...usage,
+                    limits: config.rateLimit
+                };
+            }
+        }
+    } catch (error) {
+        // If stats loading fails, continue with empty stats
+        cachedStats = {};
+    }
+}
+
+// Load stats on initialization
+await loadStats();
+
 app.get('/', async (c) => c.json(await CACHE.getJson()))
 
 app.get('/stats', async (c) => {
-    const stats: Record<string, any> = {};
-    
-    for (const config of CONFIG.models.openai) {
-        const usage = await rateLimitManager.getUsage(config.id);
-        if (usage) {
-            stats[config.id] = {
-                ...usage,
-                limits: config.rateLimit
-            };
-        }
-    }
-    
-    return c.json(stats);
+    await loadStats();
+    return c.json(cachedStats)
 })
 
 app.get('/clear', async (c) => {
@@ -35,6 +49,7 @@ app.get('/clear', async (c) => {
     for (const config of CONFIG.models.openai) {
         await rateLimitManager.reset(config.id);
     }
+    cachedStats = {};
     return c.json({ message: 'Cache and stats cleared successfully' })
 })
 
