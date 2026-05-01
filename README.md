@@ -1,4 +1,4 @@
-# @dotlabs-hq/llm-proxy
+# @dotlab-hq/llm-proxy
 
 A production-ready LLM API proxy server with rate limiting, caching, and multi-backend support. Works as an OpenAI-compatible API endpoint.
 
@@ -15,12 +15,12 @@ bun install
 Create a new `model.jsonc` configuration file with interactive prompts:
 
 ```bash
-bun src/cli/index.ts init
+llm-proxy init
 ```
 
 Or skip prompts for automation:
 ```bash
-bun src/cli/index.ts init --skip-prompts
+llm-proxy init --skip-prompts
 ```
 
 The generated template:
@@ -64,7 +64,7 @@ Edit the generated `model.jsonc` and add your LLM providers:
 ### 3. Start the Server
 
 ```bash
-bun src/cli/index.ts start
+llm-proxy start
 ```
 
 The server will:
@@ -72,6 +72,7 @@ The server will:
 - ✅ Initialize cache (memory or Redis)
 - ✅ Auto-load statistics on startup
 - ✅ Start on port 3000 (or custom port via prompt)
+- ✅ Gracefully shutdown when you press Ctrl+C
 
 ## CLI Commands
 
@@ -80,8 +81,8 @@ The server will:
 Initialize a new `model.jsonc` configuration:
 
 ```bash
-bun src/cli/index.ts init
-bun src/cli/index.ts init --skip-prompts
+llm-proxy init
+llm-proxy init --skip-prompts
 ```
 
 **What it does:**
@@ -90,34 +91,21 @@ bun src/cli/index.ts init --skip-prompts
 - Includes schema reference URL
 - Shows configuration instructions
 
-### `start` (or `serve`)
+### `start`
 
 Start the LLM Proxy server:
 
 ```bash
-bun src/cli/index.ts start
-bun src/cli/index.ts start --skip-prompts
+llm-proxy start
+llm-proxy start --skip-prompts
 ```
 
 **What it does:**
 - Loads configuration from `model.jsonc`
 - Prompts for custom port (optional)
 - Shows server configuration details
-- Starts HTTP server with auto-loaded stats
-
-### `reset`
-
-Reset configuration to fresh template:
-
-```bash
-bun src/cli/index.ts reset
-bun src/cli/index.ts reset --skip-prompts
-```
-
-**What it does:**
-- Generates fresh `model.jsonc` with latest schema
-- Clears cache if possible
-- Shows next steps for configuration
+- Starts HTTP server with graceful shutdown on Ctrl+C
+- Press Ctrl+C to stop the server
 
 ### Options
 
@@ -143,7 +131,7 @@ The generated schema reference always points to the latest version:
 
 When installed as an NPM package and linked locally, it references:
 ```jsonc
-"$schema": "./node_modules/@dotlabs-hq/llm-proxy/schema.json"
+"$schema": "./node_modules/@dotlab-hq/llm-proxy/schema.json"
 ```
 
 ### Models Configuration
@@ -236,7 +224,7 @@ bun link
 
 Register locally for use in other projects:
 ```bash
-bun link @dotlabs-hq/llm-proxy
+bun link @dotlab-hq/llm-proxy
 ```
 
 ### Build CLI for Distribution
@@ -286,7 +274,7 @@ bun run build
 ### 2. Install Globally
 
 ```bash
-npm install -g @dotlabs-hq/llm-proxy
+npm install -g @dotlab-hq/llm-proxy
 llm-proxy init
 llm-proxy start
 ```
@@ -294,7 +282,7 @@ llm-proxy start
 ### 3. Use in Projects
 
 ```bash
-npm install @dotlabs-hq/llm-proxy
+npm install @dotlab-hq/llm-proxy
 npx llm-proxy init
 npx llm-proxy start
 ```
@@ -315,4 +303,4 @@ MIT
 
 ---
 
-Created with ❤️ by Dotlabs HQ
+Created with ❤️ by dotlab HQ

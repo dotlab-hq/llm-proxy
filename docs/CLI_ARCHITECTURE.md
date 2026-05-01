@@ -107,7 +107,7 @@ bun link
 This registers the package globally so it can be used in other projects:
 
 ```bash
-bun link @dotlabs-hq/llm-proxy
+bun link @dotlab-hq/llm-proxy
 ```
 
 ### Build for Distribution

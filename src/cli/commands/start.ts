@@ -72,7 +72,7 @@ export async function startCommand(): Promise<void> {
       const { default: app } = await import( '../../server' );
       const { serve } = await import( 'bun' );
 
-      serve( {
+      const server = serve( {
         fetch: app.fetch,
         port: portNum,
       } );
@@ -86,6 +86,13 @@ export async function startCommand(): Promise<void> {
       );
 
       p.outro( chalk.green( '✅ LLM Proxy ready! Press Ctrl+C to stop' ) );
+
+      // Graceful shutdown on Ctrl+C
+      process.on( 'SIGINT', async () => {
+        console.log( '\n' );
+        p.outro( chalk.yellow( '👋 Shutting down server...' ) );
+        process.exit( 0 );
+      } );
     } catch ( err: any ) {
       s2.stop( '❌' );
       p.outro( chalk.red( `❌ ${err.message || 'Server startup failed'}` ) );
