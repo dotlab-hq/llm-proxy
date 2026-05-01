@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "proxy": {
+      "description": "URL of the proxy server to forward requests to",
+      "type": "string",
+      "format": "uri"
+    },
+    "$schema": {
+      "type": "string",
+      "format": "uri",
+      "description": "URL to the JSON Schema that this configuration adheres to"
+    },
+    "state-adapter": {
+      "anyOf": [
+        {
+          "type": "string",
+          "enum": [
+            "redis",
+            "memory"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "redis_url": {
+              "type": "string",
+              "format": "uri",
+              "description": "Redis connection URL"
+            }
+          },
+          "required": [
+            "redis_url"
+          ],
+          "additionalProperties": false
+        }
+      ],
+      "description": "Storage backend for state management - redis, memory, or { redis_url: string }"
+    },
+    "models": {
+      "type": "object",
+      "properties": {
+        "openai": {
+          "minItems": 1,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "models": {
+                "minItems": 1,
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "individualLimit": {
+                "default": false,
+                "type": "boolean"
+              },
+              "baseUrl": {
+                "type": "string",
+                "format": "uri"
+              },
+              "apiKey": {
+                "type": "string",
+                "minLength": 1
+              },
+              "rateLimit": {
+                "type": "object",
+                "properties": {
+                  "tokensPerMinute": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "requestsPerMinute": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "requestsPerDay": {
+                    "type": "integer",
+                    "exclusiveMinimum": 0,
+                    "maximum": 9007199254740991
+                  }
+                },
+                "required": [
+                  "tokensPerMinute",
+                  "requestsPerMinute",
+                  "requestsPerDay"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "models",
+              "individualLimit",
+              "baseUrl",
+              "apiKey",
+              "rateLimit"
+            ],
+            "additionalProperties": false
+          }
+        }
+      },
+      "required": [
+        "openai"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "$schema",
+    "state-adapter",
+    "models"
+  ],
+  "additionalProperties": false
+}
