@@ -1,6 +1,6 @@
 {
   "name": "@dotlab-hq/llm-proxy",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "LLM Proxy server with OpenAI compatibility",
   "module": "src/index.ts",
   "type": "module",
@@ -8,8 +8,7 @@
     "llm-proxy": "./dist/cli.js"
   },
   "exports": {
-    ".": "./src/index.ts",
-    "./server": "./src/server.ts"
+    "./cli": "./dist/cli.js"
   },
   "repository": {
     "url": "https://github.com/dotlab-hq/llm-proxy"

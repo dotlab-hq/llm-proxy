@@ -42,6 +42,10 @@ export abstract class Cache {
     async getKey<T = any>(key: string): Promise<T | undefined> {
         return this.get<T>(key);
     }
+
+    async deleteKey(key: string): Promise<void> {
+        this.delete(key);
+    }
 }
 
 export default Cache;

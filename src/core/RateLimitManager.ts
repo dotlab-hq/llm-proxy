@@ -1,100 +1,120 @@
 import { CACHE } from "../state";
 import type { Config } from "@/schema";
 
-type RateLimit = Config['models']['openai'][0]['rateLimit'];
+type RateLimit = NonNullable<Config['rateLimit']>;
 
-interface UsageRecord {
-    tokensUsed: number;
-    requestsUsed: number;
-    minuteStart: number;
-    dayStart: number;
-    dailyTokens: number;
+interface BucketRecord {
+    tokens: number;
+    lastRefill: number;
     dailyRequests: number;
+    dayStart: number;
 }
 
 export class RateLimitManager {
     private readonly keyPrefix = 'rate_limit:';
-    private readonly avgTokensPerRequest = 1000;
+    private readonly locks = new Map<string, { promise: Promise<void>; resolve: () => void }>();
 
     async checkAndConsume(
-        modelId: string, 
-        tokens: number, 
-        rateLimit: RateLimit
+        modelId: string,
+        tokens: number,
+        rateLimit: RateLimit | undefined
     ): Promise<{ allowed: boolean; reason?: string }> {
+        if (!rateLimit) {
+            return { allowed: true };
+        }
+        
         const key = `${this.keyPrefix}${modelId}`;
-        const now = Date.now();
-        const oneMinute = 60 * 1000;
-        const oneDay = 24 * 60 * 60 * 1000;
-        
-        const record = await this.getOrCreateRecord(key, now);
-        
-        if (now - record.minuteStart > oneMinute) {
-            record.tokensUsed = 0;
-            record.requestsUsed = 0;
-            record.minuteStart = now;
+
+        const release = await this.acquireLock(key);
+
+        try {
+            const record = await this.getOrCreateBucket(key);
+            const now = Date.now();
+            const oneDay = 24 * 60 * 60 * 1000;
+
+            const currentDayStart = Math.floor(now / oneDay) * oneDay;
+            if (record.dayStart !== currentDayStart) {
+                record.dailyRequests = 0;
+                record.dayStart = currentDayStart;
+            }
+
+            if (record.dailyRequests + 1 > rateLimit.requestsPerDay) {
+                return { allowed: false, reason: 'Daily request limit exceeded' };
+            }
+
+            const tokensPerSecond = rateLimit.requestsPerMinute / 60;
+            const refillAmount = (now - record.lastRefill) / 1000 * tokensPerSecond;
+            record.tokens = Math.min(rateLimit.requestsPerMinute, record.tokens + refillAmount);
+            record.lastRefill = now;
+
+            if (record.tokens >= 1) {
+                record.tokens -= 1;
+                record.dailyRequests += 1;
+                await CACHE.setKey(key, record);
+                return { allowed: true };
+            }
+
+            return { allowed: false, reason: 'Rate limit exceeded' };
+        } finally {
+            release();
         }
-        
-        const currentDayStart = Math.floor(now / oneDay) * oneDay;
-        if (record.dayStart !== currentDayStart) {
-            record.dailyTokens = 0;
-            record.dailyRequests = 0;
-            record.dayStart = currentDayStart;
-        }
-        
-        const dailyTokenLimit = rateLimit.requestsPerDay * this.avgTokensPerRequest;
-        
-        if (record.tokensUsed + tokens > rateLimit.tokensPerMinute) {
-            return { allowed: false, reason: 'Token rate limit exceeded' };
-        }
-        
-        if (record.requestsUsed + 1 > rateLimit.requestsPerMinute) {
-            return { allowed: false, reason: 'Request rate limit exceeded' };
-        }
-        
-        if (record.dailyTokens + tokens > dailyTokenLimit) {
-            return { allowed: false, reason: 'Daily token limit exceeded' };
-        }
-        
-        if (record.dailyRequests + 1 > rateLimit.requestsPerDay) {
-            return { allowed: false, reason: 'Daily request limit exceeded' };
-        }
-        
-        record.tokensUsed += tokens;
-        record.requestsUsed += 1;
-        record.dailyTokens += tokens;
-        record.dailyRequests += 1;
-        
-        await CACHE.setKey(key, record);
-        return { allowed: true };
     }
-    
-    async getUsage(modelId: string): Promise<UsageRecord | null> {
-        const key = `${this.keyPrefix}${modelId}`;
-        return await CACHE.getKey<UsageRecord>(key) ?? null;
+
+    private async acquireLock(lockKey: string): Promise<() => void> {
+        while (this.locks.has(lockKey)) {
+            const existing = this.locks.get(lockKey)!;
+            await existing.promise;
+        }
+
+        let resolveFn: () => void;
+        const promise = new Promise<void>(resolve => { resolveFn = resolve; });
+        this.locks.set(lockKey, { promise, resolve: resolveFn! });
+
+        return () => {
+            resolveFn!();
+            this.locks.delete(lockKey);
+        };
     }
-    
-    async reset(modelId: string): Promise<void> {
-        const key = `${this.keyPrefix}${modelId}`;
-        await CACHE.setKey(key, this.emptyRecord());
-    }
-    
-    private async getOrCreateRecord(key: string, now: number): Promise<UsageRecord> {
-        let record = await CACHE.getKey<UsageRecord>(key);
+
+    private async getOrCreateBucket(key: string): Promise<BucketRecord> {
+        const record = await CACHE.getKey<BucketRecord>(key);
         if (!record) {
-            record = this.emptyRecord(now);
+            const now = Date.now();
+            const oneDay = 24 * 60 * 60 * 1000;
+            const newRecord = {
+                tokens: 150,
+                lastRefill: now,
+                dailyRequests: 0,
+                dayStart: Math.floor(now / oneDay) * oneDay
+            };
+            await CACHE.setKey(key, newRecord);
+            return newRecord;
         }
         return record;
     }
-    
-    private emptyRecord(now: number = Date.now()): UsageRecord {
+
+    async getUsage(modelId: string): Promise<{ requestsUsed: number; dailyRequests: number } | null> {
+        const key = `${this.keyPrefix}${modelId}`;
+        const record = await CACHE.getKey<BucketRecord>(key);
+        return record ? {
+            requestsUsed: Math.ceil(record.tokens),
+            dailyRequests: record.dailyRequests
+        } : null;
+    }
+
+    async reset(modelId: string): Promise<void> {
+        const key = `${this.keyPrefix}${modelId}`;
+        await CACHE.setKey(key, this.emptyBucket());
+    }
+
+    private emptyBucket(): BucketRecord {
+        const now = Date.now();
         const oneDay = 24 * 60 * 60 * 1000;
         return {
-            tokensUsed: 0,
-            requestsUsed: 0,
-            minuteStart: now,
-            dayStart: Math.floor(now / oneDay) * oneDay,
-            dailyTokens: 0,
-            dailyRequests: 0
+            tokens: 0,
+            lastRefill: now,
+            dailyRequests: 0,
+            dayStart: Math.floor(now / oneDay) * oneDay
         };
     }
 }

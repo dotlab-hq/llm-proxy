@@ -4,7 +4,7 @@ const RateLimitSchema = z.object({
   tokensPerMinute: z.number({ error: 'tokensPerMinute is required' }).int('tokensPerMinute must be an integer').positive('tokensPerMinute must be > 0'),
   requestsPerMinute: z.number({ error: 'requestsPerMinute is required' }).int('requestsPerMinute must be an integer').positive('requestsPerMinute must be > 0'),
   requestsPerDay: z.number({ error: 'requestsPerDay must be a number' }).int('requestsPerDay must be an integer').positive('requestsPerDay must be > 0'),
-})
+}).optional()
 
 const OpenAIModelSchema = z.object({
   id: z.string({ error: 'id is required' }).min(1, 'id cannot be empty'),
@@ -29,6 +29,7 @@ export const ConfigSchema = z.object({
   proxy:z.url('Proxy URL must be a valid URL').optional().describe('URL of the proxy server to forward requests to'),
   '$schema': z.url('Not a valid $schema URL').describe('URL to the JSON Schema that this configuration adheres to'),
   'state-adapter': StateAdapterSchema.describe('Storage backend for state management - redis, memory, or { redis_url: string }'),
+  rateLimit: RateLimitSchema.describe('Global rate limit applied to all models unless individualLimit is true'),
   models: z.object({
     openai: z.array(OpenAIModelSchema).min(1, 'At least one OpenAI config is required'),
   }),

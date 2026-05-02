@@ -66,6 +66,13 @@ export class OpenAIProxy {
         return this.proxyRequest( c, 'completions' );
     }
 
+    private getEffectiveRateLimit(config: OpenAIModelConfig): Config['rateLimit'] | undefined {
+        if (config.individualLimit && config.rateLimit) {
+            return config.rateLimit;
+        }
+        return CONFIG.rateLimit;
+    }
+
     private async proxyRequest( c: Context, endpoint: string ) {
         const body = await c.req.json().catch( () => ( {} ) );
         const modelName = body.model;
@@ -93,10 +100,11 @@ export class OpenAIProxy {
 
         for ( const config of backends ) {
             const tokens = this.calculateTokenCount( body );
+            const rateLimit = this.getEffectiveRateLimit(config);
             const rateCheck = await rateLimitManager.checkAndConsume(
                 config.id,
                 tokens,
-                config.rateLimit
+                rateLimit
             );
 
             if ( !rateCheck.allowed ) {

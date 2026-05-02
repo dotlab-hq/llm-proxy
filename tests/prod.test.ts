@@ -1,10 +1,10 @@
 import { expect, test } from "bun:test";
 import { ChatOpenAI } from "@langchain/openai";
 
-const NUM_CALLS = 4;
+const NUM_CALLS = 20;
 
 const llm = new ChatOpenAI( {
-  model:"gemini-3.1-flash-lite-preview",
+  model:"groq/compound",
   
   temperature: 0.7,
   apiKey: "dummy",

@@ -40,9 +40,9 @@ export class RedisCache extends Cache {
         }
     }
 
-    async deleteKey(key: string): Promise<void> {
+    override async deleteKey(key: string): Promise<void> {
         await this.client.del(this.key(key))
-        super.delete(key)
+        super.deleteKey(key)
     }
 
     async setJson(obj: JSONable): Promise<void> {
