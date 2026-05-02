@@ -4,6 +4,35 @@ import path from 'path';
 import { readConfig } from '../../utils/readConfig';
 import { getConfigFileName } from '../utils/template';
 
+const DEFAULT_PORT = 25789;
+
+async function isPortAvailable( port: number ): Promise<boolean> {
+    try {
+        const server = Bun.serve( {
+            port,
+            fetch() {
+                return new Response( 'ok' );
+            },
+        } );
+        server.stop();
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+async function findAvailablePort( startPort: number ): Promise<number> {
+    if ( await isPortAvailable( startPort ) ) {
+        return startPort;
+    }
+    for ( let port = startPort + 1; port < 65535; port++ ) {
+        if ( await isPortAvailable( port ) ) {
+            return port;
+        }
+    }
+    return startPort;
+}
+
 export async function startCommand(): Promise<void> {
   p.intro( chalk.blue( '🚀 Starting LLM Proxy Server' ) );
   p.note(
@@ -36,16 +65,19 @@ export async function startCommand(): Promise<void> {
     s.stop( '✅ Configuration loaded' );
 
     const skipPrompts = process.argv.includes( '--skip-prompts' );
-    let portNum = 3000;
+    let portNum: number;
 
-    if ( !skipPrompts ) {
+    if ( skipPrompts ) {
+      portNum = await findAvailablePort( DEFAULT_PORT );
+    } else {
+      const suggestedPort = await findAvailablePort( DEFAULT_PORT );
       const port = await p.text( {
         message: 'Server port:',
-        defaultValue: '3000',
+        defaultValue: String( suggestedPort ),
         validate: ( v ) => {
-          if ( v === undefined ) return 'Port is required';
+          if ( v === undefined || v === '' ) return 'Port is required';
           const num = parseInt( v );
-          return isNaN( num ) ? 'Must be a valid port number' : undefined;
+          return isNaN( num ) || num < 1 || num > 65535 ? 'Must be a valid port number' : undefined;
         },
       } );
 

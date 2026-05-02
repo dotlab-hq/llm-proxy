@@ -1,33 +1,21 @@
 # @dotlab-hq/llm-proxy
 
-A production-ready LLM API proxy server with rate limiting, caching, and multi-backend support. Works as an OpenAI-compatible API endpoint.
-
-## Installation
-
-```bash
-bun install
-```
+A local LLM API proxy server with rate limiting, caching, and multi-backend support. Works as an OpenAI-compatible API endpoint.
 
 ## Quick Start
 
 ### 1. Initialize Configuration
 
-Create a new `model.jsonc` configuration file with interactive prompts:
+Create a new `model.jsonc` configuration file:
 
 ```bash
-llm-proxy init
+npx @dotlab-hq/llm-proxy init
 ```
 
 Or skip prompts for automation:
 ```bash
-llm-proxy init --skip-prompts
+npx @dotlab-hq/llm-proxy init --skip-prompts
 ```
-
-The generated template:
-- ✅ Includes helpful comments
-- ✅ References latest schema from GitHub
-- ✅ Shows latest commit hash
-- ✅ JSONC format (JSON with Comments)
 
 ### 2. Configure Your Models
 
@@ -35,12 +23,8 @@ Edit the generated `model.jsonc` and add your LLM providers:
 
 ```jsonc
 {
-  // Schema reference (always latest from GitHub)
   "$schema": "https://raw.githubusercontent.com/dotlab-hq/llm-proxy/refs/heads/main/schema.json",
-  
-  // State adapter: "memory" or "redis"
   "state-adapter": "memory",
-
   "models": {
     "openai": [
       {
@@ -64,15 +48,12 @@ Edit the generated `model.jsonc` and add your LLM providers:
 ### 3. Start the Server
 
 ```bash
-llm-proxy start
+npx @dotlab-hq/llm-proxy serve
 ```
 
-The server will:
-- ✅ Load configuration from `model.jsonc`
-- ✅ Initialize cache (memory or Redis)
-- ✅ Auto-load statistics on startup
-- ✅ Start on port 3000 (or custom port via prompt)
-- ✅ Gracefully shutdown when you press Ctrl+C
+The server starts on port **25789** by default. If busy, it auto-selects the next available port.
+
+With `--skip-prompts`, the server starts immediately without prompts.
 
 ## CLI Commands
 
@@ -81,31 +62,24 @@ The server will:
 Initialize a new `model.jsonc` configuration:
 
 ```bash
-llm-proxy init
-llm-proxy init --skip-prompts
+npx @dotlab-hq/llm-proxy init
+npx @dotlab-hq/llm-proxy init --skip-prompts
 ```
 
-**What it does:**
-- Generates `model.jsonc` with helpful comments
-- Fetches latest commit from GitHub
-- Includes schema reference URL
-- Shows configuration instructions
-
-### `start`
+### `serve`
 
 Start the LLM Proxy server:
 
 ```bash
-llm-proxy start
-llm-proxy start --skip-prompts
+npx @dotlab-hq/llm-proxy serve
+npx @dotlab-hq/llm-proxy serve --skip-prompts
 ```
 
 **What it does:**
 - Loads configuration from `model.jsonc`
-- Prompts for custom port (optional)
+- Starts on port 25789 (auto-selects next available if busy)
 - Shows server configuration details
-- Starts HTTP server with graceful shutdown on Ctrl+C
-- Press Ctrl+C to stop the server
+- Press Ctrl+C to stop
 
 ### Options
 
@@ -166,13 +140,13 @@ Each backend configuration includes:
 ### Get Cache Status
 
 ```bash
-curl http://localhost:3000/
+curl http://localhost:25789/
 ```
 
 ### Get Statistics
 
 ```bash
-curl http://localhost:3000/stats
+curl http://localhost:25789/stats
 ```
 
 Auto-loaded on server startup with current rate limit usage.
@@ -187,9 +161,9 @@ Auto-loaded on server startup with current rate limit usage.
 Example:
 
 ```bash
-curl -X POST http://localhost:3000/v1/chat/completions \
+curl -X POST http://localhost:25789/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer nlm-proxy" \
+  -H "Authorization: Bearer llm-proxy" \
   -d '{
     "model": "gpt-3.5-turbo",
     "messages": [{"role": "user", "content": "Hello!"}]
@@ -271,20 +245,29 @@ For detailed information about the CLI structure and development, see [CLI_ARCHI
 bun run build
 ```
 
-### 2. Install Globally
+### 2. Use in Projects
 
 ```bash
-npm install -g @dotlab-hq/llm-proxy
-llm-proxy init
-llm-proxy start
+npx @dotlab-hq/llm-proxy init
+npx @dotlab-hq/llm-proxy serve
 ```
 
-### 3. Use in Projects
+### Environment Variables
 
-```bash
-npm install @dotlab-hq/llm-proxy
-npx llm-proxy init
-npx llm-proxy start
+Use `${VAR_NAME}` in your `model.jsonc` to reference environment variables:
+
+```jsonc
+{
+  "models": {
+    "openai": [
+      {
+        "apiKey": "${OPENAI_API_KEY}",
+        "baseUrl": "https://api.openai.com/v1",
+        "models": ["gpt-3.5-turbo"]
+      }
+    ]
+  }
+}
 ```
 
 ## Architecture

@@ -73,7 +73,7 @@ export class OpenAIProxy {
         return CONFIG.rateLimit;
     }
 
-    private async proxyRequest( c: Context, endpoint: string ) {
+    private async proxyRequest( c: Context, endpoint: string, redirectDepth: number = 1 ): Promise<any> {
         const body = await c.req.json().catch( () => ( {} ) );
         const modelName = body.model;
 
@@ -81,6 +81,16 @@ export class OpenAIProxy {
             return c.json( {
                 error: {
                     message: 'Model is required and must be a string',
+                    type: 'invalid_request_error'
+                }
+            }, 400 );
+        }
+
+        const maxRedirects = 5;
+        if ( redirectDepth > maxRedirects ) {
+            return c.json( {
+                error: {
+                    message: 'Maximum redirect depth exceeded',
                     type: 'invalid_request_error'
                 }
             }, 400 );
@@ -124,6 +134,17 @@ export class OpenAIProxy {
                     continue;
                 }
 
+                if ( this.isRedirectStatus( response.status ) ) {
+                    const location = response.headers.get( 'location' );
+                    if ( location ) {
+                        const redirectModel = this.extractModelFromLocation( location );
+                        if ( redirectModel && redirectModel !== modelName ) {
+                            body.model = redirectModel;
+                            return this.proxyRequest( c, endpoint, redirectDepth + 1 );
+                        }
+                    }
+                }
+
                 const data = await response.json();
                 return c.json( data, response.status as any );
             } catch ( error ) {
@@ -137,6 +158,29 @@ export class OpenAIProxy {
                 type: 'internal_error'
             }
         }, 502 );
+    }
+
+    private isRedirectStatus( status: number ): boolean {
+        return [ 301, 302, 303, 307, 308 ].includes( status );
+    }
+
+    private extractModelFromLocation( location: string ): string | null {
+        try {
+            if ( location.includes( 'kilo-auto/' ) ) {
+                const match = location.match( /kilo-auto\/([^/]+)/ );
+                if ( match ) {
+                    return `kilo-auto/${match[1]}`;
+                }
+            }
+            const parts = location.split( '/' );
+            const lastPart = parts[ parts.length - 1 ];
+            if ( lastPart && lastPart.length > 0 ) {
+                return lastPart;
+            }
+        } catch {
+            return null;
+        }
+        return null;
     }
 
     private getBackendsForModel( modelName: string ): OpenAIModelConfig[] {

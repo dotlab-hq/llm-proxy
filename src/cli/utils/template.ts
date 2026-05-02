@@ -78,8 +78,8 @@ export async function generateTemplate(): Promise<string> {
         "individualLimit": true,
         // Base URL for the OpenAI-compatible API
         "baseUrl": "https://api.openai.com/v1",
-        // API key for authentication
-        "apiKey": "sk-your-api-key-here",
+        // API key for authentication (use env var: \${OPENAI_API_KEY})
+        "apiKey": "\${OPENAI_API_KEY}",
         // Rate limiting configuration
         "rateLimit": {
           // Tokens allowed per minute

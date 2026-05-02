@@ -1,6 +1,6 @@
 {
   "name": "@dotlab-hq/llm-proxy",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "LLM Proxy server with OpenAI compatibility",
   "type": "module",
   "bin": {
