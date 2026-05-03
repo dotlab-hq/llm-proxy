@@ -255,7 +255,7 @@ export class OpenAIProxy {
         return {
             'Content-Type': 'application/json',
             'Authorization': `Bearer ${config.apiKey}`,
-            'User-Agent': 'llm-proxy/1.0',
+            'User-Agent': 'ai-edge/1.0',
         };
     }
 

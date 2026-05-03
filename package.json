@@ -1,10 +1,10 @@
 {
-  "name": "ai-router",
+  "name": "ai-edge",
   "version": "1.0.0",
-  "description": "LLM Proxy server with OpenAI compatibility",
+  "description": "Local LLM routing server with OpenAI compatibility",
   "type": "module",
   "bin": {
-    "llm-proxy": "./dist/cli.js"
+    "ai-edge": "./dist/cli.js"
   },
   "exports": {
     ".": {
@@ -26,7 +26,7 @@
     "LICENSE"
   ],
   "repository": {
-    "url": "https://github.com/dotlab-hq/llm-proxy"
+    "url": "https://github.com/dotlab-hq/ai-edge"
   },
   "scripts": {
     "start": "node dist/server.js",

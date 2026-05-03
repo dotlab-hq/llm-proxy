@@ -38,7 +38,7 @@ The template dynamically generates schema references:
 
 **For CLI Usage (Downloaded Template):**
 ```json
-"$schema": "https://raw.githubusercontent.com/dotlab-hq/llm-proxy/refs/heads/main/schema.json"
+"$schema": "https://raw.githubusercontent.com/dotlab-hq/ai-edge/refs/heads/main/schema.json"
 ```
 
 **For NPM Package Installation:**
@@ -107,7 +107,7 @@ bun link
 This registers the package globally so it can be used in other projects:
 
 ```bash
-bun link @dotlab-hq/llm-proxy
+bun link ai-edge
 ```
 
 ### Build for Distribution

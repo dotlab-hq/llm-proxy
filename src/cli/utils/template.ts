@@ -1,6 +1,6 @@
 import path from 'path';
 
-const GITHUB_API = 'https://api.github.com/repos/dotlab-hq/llm-proxy/commits?per_page=1';
+const GITHUB_API = 'https://api.github.com/repos/dotlab-hq/ai-edge/commits?per_page=1';
 
 interface LatestCommit {
   sha: string;
@@ -9,21 +9,21 @@ interface LatestCommit {
 
 export async function getLatestCommit(): Promise<LatestCommit> {
   try {
-    const response = await fetch(GITHUB_API);
-    if (!response.ok) throw new Error('Failed to fetch latest commit');
-    
+    const response = await fetch( GITHUB_API );
+    if ( !response.ok ) throw new Error( 'Failed to fetch latest commit' );
+
     const data = await response.json() as any[];
-    if (!data || data.length === 0) throw new Error('No commits found');
-    
+    if ( !data || data.length === 0 ) throw new Error( 'No commits found' );
+
     return {
-      sha: data[0].sha.substring(0, 7),
-      date: new Date().toISOString().split('T')[0]?.toString() || '',
+      sha: data[0].sha.substring( 0, 7 ),
+      date: new Date().toISOString().split( 'T' )[0]?.toString() || '',
     };
-  } catch (error) {
-    console.warn('⚠️  Could not fetch latest commit, using default');
+  } catch ( error ) {
+    console.warn( '⚠️  Could not fetch latest commit, using default' );
     return {
       sha: 'main',
-      date: new Date().toISOString().split('T')[0]?.toString() || '',
+      date: new Date().toISOString().split( 'T' )[0]?.toString() || '',
     };
   }
 }
@@ -31,21 +31,21 @@ export async function getLatestCommit(): Promise<LatestCommit> {
 export async function getSchemaReference(): Promise<string> {
   // Check if running from node_modules (installed package)
   const modulePath = process.cwd();
-  const isNodeModule = modulePath.includes('node_modules');
-  
-  if (isNodeModule) {
+  const isNodeModule = modulePath.includes( 'node_modules' );
+
+  if ( isNodeModule ) {
     return '../schema.json'; // Reference local schema in node_modules
   }
 
   const commit = await getLatestCommit();
 
-  return `https://raw.githubusercontent.com/dotlab-hq/llm-proxy/${commit.sha}/schema.json`;
+  return `https://raw.githubusercontent.com/dotlab-hq/ai-edge/${commit.sha}/schema.json`;
 }
 
 export async function generateTemplate(): Promise<string> {
   const commit = await getLatestCommit();
   const schemaRef = await getSchemaReference();
-  
+
   const template = `{
   // LLM Proxy Configuration
   // Schema: ${schemaRef}

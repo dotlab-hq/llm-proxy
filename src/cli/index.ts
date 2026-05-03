@@ -10,7 +10,7 @@ async function main() {
   const command = process.argv[2];
 
   try {
-    switch (command) {
+    switch ( command ) {
       case 'init':
         await initCommand();
         break;
@@ -22,7 +22,7 @@ async function main() {
         await resetCommand();
         break;
       default:
-        p.intro(chalk.blue('🚀 LLM Proxy CLI'));
+        p.intro( chalk.blue( '🚀 LLM Proxy CLI' ) );
         p.note(
           'init      - Initialize model.jsonc\n' +
           'start     - Start the server\n' +
@@ -33,11 +33,11 @@ async function main() {
           '--skip-prompts  - Skip interactive prompts',
           'Options'
         );
-        p.outro('Visit: https://github.com/dotlab-hq/llm-proxy');
+        p.outro( 'Visit: https://github.com/dotlab-hq/ai-edge' );
     }
-  } catch (err) {
-    p.outro(chalk.red(`❌ ${(err as any).message || 'Unexpected error'}`));
-    process.exit(1);
+  } catch ( err ) {
+    p.outro( chalk.red( `❌ ${( err as any ).message || 'Unexpected error'}` ) );
+    process.exit( 1 );
   }
 }
 

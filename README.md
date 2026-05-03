@@ -1,4 +1,4 @@
-# @dotlab-hq/llm-proxy
+# ai-edge
 
 A local LLM API proxy server with rate limiting, caching, and multi-backend support. Works as an OpenAI-compatible API endpoint.
 
@@ -9,12 +9,12 @@ A local LLM API proxy server with rate limiting, caching, and multi-backend supp
 Create a new `model.jsonc` configuration file:
 
 ```bash
-npx @dotlab-hq/llm-proxy init
+npx ai-edge init
 ```
 
 Or skip prompts for automation:
 ```bash
-npx @dotlab-hq/llm-proxy init --skip-prompts
+npx ai-edge init --skip-prompts
 ```
 
 ### 2. Configure Your Models
@@ -23,7 +23,7 @@ Edit the generated `model.jsonc` and add your LLM providers:
 
 ```jsonc
 {
-  "$schema": "https://raw.githubusercontent.com/dotlab-hq/llm-proxy/refs/heads/main/schema.json",
+  "$schema": "https://raw.githubusercontent.com/dotlab-hq/ai-edge/refs/heads/main/schema.json",
   "state-adapter": "memory",
   "models": {
     "openai": [
@@ -48,7 +48,7 @@ Edit the generated `model.jsonc` and add your LLM providers:
 ### 3. Start the Server
 
 ```bash
-npx @dotlab-hq/llm-proxy serve
+npx ai-edge serve
 ```
 
 The server starts on port **25789** by default. If busy, it auto-selects the next available port.
@@ -62,8 +62,8 @@ With `--skip-prompts`, the server starts immediately without prompts.
 Initialize a new `model.jsonc` configuration:
 
 ```bash
-npx @dotlab-hq/llm-proxy init
-npx @dotlab-hq/llm-proxy init --skip-prompts
+npx ai-edge init
+npx ai-edge init --skip-prompts
 ```
 
 ### `serve`
@@ -71,8 +71,8 @@ npx @dotlab-hq/llm-proxy init --skip-prompts
 Start the LLM Proxy server:
 
 ```bash
-npx @dotlab-hq/llm-proxy serve
-npx @dotlab-hq/llm-proxy serve --skip-prompts
+npx ai-edge serve
+npx ai-edge serve --skip-prompts
 ```
 
 **What it does:**
@@ -100,12 +100,12 @@ The configuration uses **JSONC** format for better user experience:
 The generated schema reference always points to the latest version:
 
 ```jsonc
-"$schema": "https://raw.githubusercontent.com/dotlab-hq/llm-proxy/refs/heads/main/schema.json"
+"$schema": "https://raw.githubusercontent.com/dotlab-hq/ai-edge/refs/heads/main/schema.json"
 ```
 
 When installed as an NPM package and linked locally, it references:
 ```jsonc
-"$schema": "./node_modules/@dotlab-hq/llm-proxy/schema.json"
+"$schema": "./node_modules/ai-edge/schema.json"
 ```
 
 ### Models Configuration
@@ -163,7 +163,7 @@ Example:
 ```bash
 curl -X POST http://localhost:25789/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer llm-proxy" \
+  -H "Authorization: Bearer ai-edge" \
   -d '{
     "model": "gpt-3.5-turbo",
     "messages": [{"role": "user", "content": "Hello!"}]
@@ -198,7 +198,7 @@ bun link
 
 Register locally for use in other projects:
 ```bash
-bun link @dotlab-hq/llm-proxy
+bun link ai-edge
 ```
 
 ### Build CLI for Distribution
@@ -248,8 +248,8 @@ bun run build
 ### 2. Use in Projects
 
 ```bash
-npx @dotlab-hq/llm-proxy init
-npx @dotlab-hq/llm-proxy serve
+npx ai-edge init
+npx ai-edge serve
 ```
 
 ### Environment Variables
