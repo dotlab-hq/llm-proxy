@@ -1,11 +1,20 @@
 // this will check if in the workspace there is file named `models.(json|jsonc|yaml|yml)` and if so, it will read the file and return the content as a JSON object
 
+import { access } from 'node:fs/promises';
 import { schema } from "@/schema";
 import { MODEL_FILE_PATHS } from "./lookup.files";
 import { readConfig } from "./readConfig";
 
+async function fileExists(filePath: string): Promise<boolean> {
+    try {
+        await access(filePath);
+        return true;
+    } catch {
+        return false;
+    }
+}
 
-const files = await Promise.all(MODEL_FILE_PATHS.map((filePath) => Bun.file(filePath).exists()));
+const files = await Promise.all(MODEL_FILE_PATHS.map((filePath) => fileExists(filePath)));
 
 const NoOfFilesFound = files.filter(Boolean).length;
 

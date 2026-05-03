@@ -1,9 +1,11 @@
 
-export const readConfig = async ( filePath: string ) => {
-    const file = Bun.file( filePath );
-    const content = await file.text();
+import { readFile } from 'node:fs/promises';
+import JSON5 from 'json5';
 
-    const data = Bun.JSON5.parse( content );
+export const readConfig = async ( filePath: string ) => {
+    const content = await readFile( filePath, 'utf-8' );
+
+    const data = JSON5.parse( content );
     const substituted = substituteEnvVars( data );
     return substituted;
 }

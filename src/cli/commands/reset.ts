@@ -1,6 +1,7 @@
 import * as p from '@clack/prompts';
 import chalk from 'chalk';
 import path from 'path';
+import { writeFile } from 'node:fs/promises';
 import { generateTemplate, getConfigFileName } from '../utils/template';
 
 export async function resetCommand(): Promise<void> {
@@ -44,7 +45,7 @@ export async function resetCommand(): Promise<void> {
     const configPath = path.join(cwd, configFileName);
     
     const template = await generateTemplate();
-    await Bun.write(configPath, template);
+    await writeFile(configPath, template, 'utf-8');
 
     s.stop('✅ Configuration reset');
 
