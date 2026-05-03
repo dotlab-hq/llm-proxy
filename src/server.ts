@@ -69,7 +69,7 @@ app.get( '/clear', async ( c ) => {
 } )
 
 // package version endpoint
-app.get( '/v1/version', async ( c ) => {
+app.get( '/api/v1/version', async ( c ) => {
     try {
         const pkg = await import( '../package.json', { assert: { type: 'json' } } as any )
         return c.json( { version: pkg.version } )
