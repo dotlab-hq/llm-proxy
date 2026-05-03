@@ -57,6 +57,9 @@ app.get('/clear', async (c) => {
 app.route('/', openAIProxy.getApp())
 
 const port = parseInt(process.env['PORT'] ?? '25789');
+if (isNaN(port) || port < 1 || port > 65535) {
+    throw new Error(`Invalid PORT environment variable: "${process.env['PORT']}". Must be a number between 1 and 65535.`);
+}
 serve({ fetch: app.fetch, port });
 
 export default app
