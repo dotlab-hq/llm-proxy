@@ -175,7 +175,7 @@ export class OpenAIProxy {
                 }
 
                 const data = await response.json();
-                return c.json( data, response.status as any );
+                return c.json( this.attachUsageIfMissing( endpoint, body, data ), response.status as any );
             } catch ( error ) {
                 continue;
             }
@@ -260,19 +260,240 @@ export class OpenAIProxy {
     }
 
     private calculateTokenCount( body: any ): number {
-        if ( !body ) return 100;
-        if ( body.messages && Array.isArray( body.messages ) ) {
-            return body.messages.reduce( ( sum: number, m: any ) =>
-                sum + Math.ceil( ( m.content?.length || 0 ) / 4 ), 0
-            ) || 100;
+        if ( body?.input !== undefined ) {
+            const embeddingTokens = this.calculateEmbeddingTokenCount( body.input );
+            if ( embeddingTokens > 0 ) {
+                return embeddingTokens;
+            }
         }
-        if ( body.input ) {
-            return Math.ceil( ( body.input?.length || 0 ) / 4 ) || 100;
+
+        return this.calculateTokenCountFromStrings( this.extractRequestTokenStrings( body ) );
+    }
+
+    private attachUsageIfMissing( endpoint: string, requestBody: any, responseData: any ): any {
+        if ( !responseData || typeof responseData !== 'object' || Array.isArray( responseData ) ) {
+            return responseData;
         }
-        if ( body.prompt ) {
-            return Math.ceil( ( body.prompt?.length || 0 ) / 4 ) || 100;
+
+        if ( responseData.usage ) {
+            return responseData;
         }
-        return 100;
+
+        const usage = this.buildUsageForEndpoint( endpoint, requestBody, responseData );
+        if ( !usage ) {
+            return responseData;
+        }
+
+        return {
+            ...responseData,
+            usage,
+        };
+    }
+
+    private buildUsageForEndpoint( endpoint: string, requestBody: any, responseData: any ): Record<string, any> | null {
+        const promptTokens = this.calculateTokenCountFromStrings( this.extractRequestTokenStrings( requestBody, endpoint ), 0 );
+        const completionTokens = this.calculateTokenCountFromStrings( this.extractResponseTokenStrings( endpoint, responseData ), 0 );
+
+        if ( endpoint === 'responses' ) {
+            return {
+                input_tokens: promptTokens,
+                input_tokens_details: {
+                    cached_tokens: 0,
+                },
+                output_tokens: completionTokens,
+                output_tokens_details: {
+                    reasoning_tokens: 0,
+                },
+                total_tokens: promptTokens + completionTokens,
+            };
+        }
+
+        if ( endpoint === 'embeddings' ) {
+            const embeddingTokens = this.calculateEmbeddingTokenCount( requestBody?.input );
+            return {
+                prompt_tokens: embeddingTokens || promptTokens,
+                total_tokens: embeddingTokens || promptTokens,
+            };
+        }
+
+        if ( endpoint === 'chat/completions' || endpoint === 'completions' ) {
+            return {
+                prompt_tokens: promptTokens,
+                completion_tokens: completionTokens,
+                total_tokens: promptTokens + completionTokens,
+            };
+        }
+
+        return null;
+    }
+
+    private extractRequestTokenStrings( body: any, endpoint?: string ): string[] {
+        if ( !body ) {
+            return [];
+        }
+
+        if ( endpoint === 'completions' ) {
+            return this.collectTokenStrings( body.prompt );
+        }
+
+        if ( endpoint === 'chat/completions' ) {
+            return this.collectTokenStrings( body.messages );
+        }
+
+        if ( endpoint === 'responses' ) {
+            return [
+                ...this.collectTokenStrings( body.input ),
+                ...this.collectTokenStrings( body.instructions ),
+                ...this.collectTokenStrings( body.prompt ),
+            ];
+        }
+
+        if ( endpoint === 'embeddings' ) {
+            return this.collectTokenStrings( body.input );
+        }
+
+        return this.collectTokenStrings( body );
+    }
+
+    private extractResponseTokenStrings( endpoint: string, responseData: any ): string[] {
+        if ( !responseData || typeof responseData !== 'object' ) {
+            return [];
+        }
+
+        if ( endpoint === 'completions' || endpoint === 'chat/completions' ) {
+            return this.collectTokenStrings( responseData.choices );
+        }
+
+        if ( endpoint === 'responses' ) {
+            return this.collectTokenStrings( responseData.output );
+        }
+
+        if ( endpoint === 'embeddings' ) {
+            return [];
+        }
+
+        return this.collectTokenStrings( responseData );
+    }
+
+    private collectTokenStrings( value: any ): string[] {
+        if ( value == null ) {
+            return [];
+        }
+
+        if ( typeof value === 'string' ) {
+            return [value];
+        }
+
+        if ( typeof value === 'number' || typeof value === 'boolean' ) {
+            return [];
+        }
+
+        if ( Array.isArray( value ) ) {
+            return value.flatMap( item => this.collectTokenStrings( item ) );
+        }
+
+        if ( typeof value !== 'object' ) {
+            return [];
+        }
+
+        const countableKeys = new Set( [
+            'content',
+            'text',
+            'input',
+            'prompt',
+            'instructions',
+            'messages',
+            'message',
+            'choices',
+            'output',
+            'tool_calls',
+            'function_call',
+            'arguments',
+            'code',
+            'logs',
+            'refusal',
+            'query',
+            'queries',
+            'variables',
+            'delta',
+            'file_data',
+            'file_url',
+            'image_url',
+        ] );
+
+        const ignoredKeys = new Set( [
+            'annotations',
+            'metadata',
+            'usage',
+            'error',
+            'id',
+            'role',
+            'status',
+            'type',
+            'object',
+            'model',
+            'created',
+            'created_at',
+            'finish_reason',
+            'index',
+            'system_fingerprint',
+            'incomplete_details',
+            'reason',
+        ] );
+
+        return Object.entries( value ).flatMap( ( [key, nestedValue] ) => {
+            if ( ignoredKeys.has( key ) ) {
+                return [];
+            }
+
+            if ( countableKeys.has( key ) ) {
+                return this.collectTokenStrings( nestedValue );
+            }
+
+            return [];
+        } );
+    }
+
+    private calculateTokenCountFromStrings( values: string[], fallback: number = 100 ): number {
+        const total = values.reduce( ( sum: number, value: string ) =>
+            sum + Math.max( 1, Math.ceil( value.length / 4 ) ), 0
+        );
+
+        return total || fallback;
+    }
+
+    private calculateEmbeddingTokenCount( input: any ): number {
+        if ( input == null ) {
+            return 0;
+        }
+
+        if ( typeof input === 'string' ) {
+            return Math.max( 1, Math.ceil( input.length / 4 ) );
+        }
+
+        if ( typeof input === 'number' ) {
+            return 1;
+        }
+
+        if ( Array.isArray( input ) ) {
+            if ( input.length === 0 ) {
+                return 0;
+            }
+
+            if ( input.every( item => typeof item === 'number' ) ) {
+                return input.length;
+            }
+
+            return input.reduce( ( sum: number, item: any ) => sum + this.calculateEmbeddingTokenCount( item ), 0 );
+        }
+
+        if ( typeof input === 'object' ) {
+            return this.collectTokenStrings( input ).reduce( ( sum: number, value: string ) =>
+                sum + Math.max( 1, Math.ceil( value.length / 4 ) ), 0
+            );
+        }
+
+        return 0;
     }
 }
 
