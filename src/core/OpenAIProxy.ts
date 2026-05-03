@@ -1,5 +1,6 @@
 import { Hono } from 'hono';
 import type { Context } from 'hono';
+import { stream } from 'hono/streaming';
 import { rateLimitManager } from './RateLimitManager';
 import { CONFIG } from '@/utils/schema.lookup';
 import type { Config } from '@/schema';
@@ -66,8 +67,8 @@ export class OpenAIProxy {
         return this.proxyRequest( c, 'completions' );
     }
 
-    private getEffectiveRateLimit(config: OpenAIModelConfig): Config['rateLimit'] | undefined {
-        if (config.individualLimit && config.rateLimit) {
+    private getEffectiveRateLimit( config: OpenAIModelConfig ): Config['rateLimit'] | undefined {
+        if ( config.individualLimit && config.rateLimit ) {
             return config.rateLimit;
         }
         return CONFIG.rateLimit;
@@ -110,7 +111,7 @@ export class OpenAIProxy {
 
         for ( const config of backends ) {
             const tokens = this.calculateTokenCount( body );
-            const rateLimit = this.getEffectiveRateLimit(config);
+            const rateLimit = this.getEffectiveRateLimit( config );
             const rateCheck = await rateLimitManager.checkAndConsume(
                 config.id,
                 tokens,
@@ -145,6 +146,34 @@ export class OpenAIProxy {
                     }
                 }
 
+                // Handle streaming responses
+                if ( body.stream === true ) {
+                    c.header( 'Content-Type', 'text/event-stream' );
+                    c.header( 'Cache-Control', 'no-cache' );
+                    c.header( 'Connection', 'keep-alive' );
+
+                    if ( response.body ) {
+                        return stream( c, async ( streamWriter ) => {
+                            const reader = response.body!.getReader();
+                            const decoder = new TextDecoder();
+
+                            try {
+                                while ( true ) {
+                                    const { done, value } = await reader.read();
+                                    if ( done ) break;
+                                    const chunk = decoder.decode( value, { stream: true } );
+                                    await streamWriter.write( chunk );
+                                }
+                            } finally {
+                                reader.releaseLock();
+                            }
+                        }, async ( err, streamWriter ) => {
+                            console.error( 'Streaming error:', err );
+                            await streamWriter.writeln( 'An error occurred during streaming' );
+                        } );
+                    }
+                }
+
                 const data = await response.json();
                 return c.json( data, response.status as any );
             } catch ( error ) {
@@ -161,7 +190,7 @@ export class OpenAIProxy {
     }
 
     private isRedirectStatus( status: number ): boolean {
-        return [ 301, 302, 303, 307, 308 ].includes( status );
+        return [301, 302, 303, 307, 308].includes( status );
     }
 
     private extractModelFromLocation( location: string ): string | null {
@@ -173,7 +202,7 @@ export class OpenAIProxy {
                 }
             }
             const parts = location.split( '/' );
-            const lastPart = parts[ parts.length - 1 ];
+            const lastPart = parts[parts.length - 1];
             if ( lastPart && lastPart.length > 0 ) {
                 return lastPart;
             }

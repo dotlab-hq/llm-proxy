@@ -68,23 +68,7 @@ app.get( '/clear', async ( c ) => {
     return c.json( { message: 'Cache and stats cleared successfully' } )
 } )
 
-// package version endpoint
-app.get( '/v1/api/version', async ( c ) => {
-    try {
-        const pkg = await import( '../package.json', { assert: { type: 'json' } } as any )
-        return c.json( { version: pkg.version } )
-    } catch ( err ) {
-        // fallback: read from file system
-        try {
-            const fs = await import( 'node:fs/promises' )
-            const content = await fs.readFile( new URL( '../package.json', import.meta.url ), 'utf-8' )
-            const parsed = JSON.parse( content )
-            return c.json( { version: parsed.version } )
-        } catch ( e ) {
-            return c.json( { version: null } )
-        }
-    }
-} )
+
 
 // v1 models in OpenAI list format
 app.get( '/v1/models', async ( c ) => {
