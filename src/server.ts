@@ -1,5 +1,6 @@
 import { Hono } from 'hono'
 import { logger } from 'hono/logger';
+import { serve } from '@hono/node-server';
 import { CACHE } from "./state";
 import { openAIProxy } from "./core/OpenAIProxy";
 import { CONFIG } from "./utils/schema.lookup";
@@ -54,5 +55,8 @@ app.get('/clear', async (c) => {
 })
 
 app.route('/', openAIProxy.getApp())
+
+const port = parseInt(process.env['PORT'] ?? '25789');
+serve({ fetch: app.fetch, port });
 
 export default app

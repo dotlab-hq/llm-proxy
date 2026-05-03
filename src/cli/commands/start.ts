@@ -1,24 +1,23 @@
 import * as p from '@clack/prompts';
 import chalk from 'chalk';
 import path from 'path';
+import net from 'node:net';
+import { access } from 'node:fs/promises';
+import { serve } from '@hono/node-server';
 import { readConfig } from '../../utils/readConfig';
 import { getConfigFileName } from '../utils/template';
 
 const DEFAULT_PORT = 25789;
 
 async function isPortAvailable( port: number ): Promise<boolean> {
-    try {
-        const server = Bun.serve( {
-            port,
-            fetch() {
-                return new Response( 'ok' );
-            },
+    return new Promise( ( resolve ) => {
+        const server = net.createServer();
+        server.once( 'error', () => resolve( false ) );
+        server.once( 'listening', () => {
+            server.close( () => resolve( true ) );
         } );
-        server.stop();
-        return true;
-    } catch {
-        return false;
-    }
+        server.listen( port );
+    } );
 }
 
 async function findAvailablePort( startPort: number ): Promise<number> {
@@ -44,8 +43,8 @@ export async function startCommand(): Promise<void> {
     const configFileName = getConfigFileName();
     const configPath = path.join( cwd, configFileName );
 
-    const configFile = Bun.file( configPath );
-    if ( !( await configFile.exists() ) ) {
+    const configExists = await access( configPath ).then( () => true ).catch( () => false );
+    if ( !configExists ) {
       p.outro( chalk.red( `❌ ${configFileName} not found. Run "llm-proxy init" first.` ) );
       process.exit( 1 );
     }
@@ -102,12 +101,8 @@ export async function startCommand(): Promise<void> {
 
     try {
       const { default: app } = await import( '../../server' );
-      const { serve } = await import( 'bun' );
 
-      const server = serve( {
-        fetch: app.fetch,
-        port: portNum,
-      } );
+      serve( { fetch: app.fetch, port: portNum } );
 
       s2.stop( `✅ Server running on http://localhost:${portNum}` );
 

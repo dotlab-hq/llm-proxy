@@ -41,8 +41,8 @@ export class OpenAIProxy {
 
             const response = await fetch( `${firstConfig.baseUrl}/v1/models`, {
                 headers: this.buildHeaders( firstConfig ),
-                proxy: CONFIG.proxy ? CONFIG.proxy : undefined,
-            } );
+                ...( CONFIG.proxy ? { proxy: CONFIG.proxy } as Record<string, unknown> : {} ),
+            } as RequestInit );
             const data = await response.json();
             return c.json( data, response.status as any );
         } catch ( error ) {
@@ -127,8 +127,8 @@ export class OpenAIProxy {
                     method: 'POST',
                     headers: this.buildHeaders( config ),
                     body: JSON.stringify( body ),
-                    proxy: CONFIG.proxy ? CONFIG.proxy : undefined,
-                } );
+                    ...( CONFIG.proxy ? { proxy: CONFIG.proxy } as Record<string, unknown> : {} ),
+                } as RequestInit );
 
                 if ( response.status === 429 ) {
                     continue;

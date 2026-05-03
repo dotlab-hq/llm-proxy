@@ -2,6 +2,7 @@
 import type { JSONable } from '../core/Cache'
 import { CONFIG } from '@/utils/schema.lookup'
 import type { Config } from "@/schema";
+import { Redis } from 'ioredis'
 
 const DUMP_KEY = '__cache_dump__'
 
@@ -11,12 +12,12 @@ type TransformedModel = Omit<OpenAIModelConfig, 'models'> & {
 };
 
 export class RedisCache extends Cache {
-    private client: Bun.RedisClient
+    private client: Redis
     private prefix: string
 
     constructor(redis_url: string, prefix = 'cache:') {
         super()
-        this.client = new Bun.RedisClient(redis_url)
+        this.client = new Redis(redis_url)
         this.prefix = prefix
     }
 

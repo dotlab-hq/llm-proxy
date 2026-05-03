@@ -1,3 +1,4 @@
+import { writeFile } from 'node:fs/promises';
 import { schema } from "@/schema";
 
-Bun.write("schema.json", JSON.stringify(schema.toJSONSchema(), null, 2));
+await writeFile("schema.json", JSON.stringify(schema.toJSONSchema(), null, 2));

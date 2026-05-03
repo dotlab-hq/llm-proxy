@@ -1,6 +1,7 @@
 import * as p from '@clack/prompts';
 import chalk from 'chalk';
 import path from 'path';
+import { access, writeFile } from 'node:fs/promises';
 import { generateTemplate, getConfigFileName } from '../utils/template';
 
 export async function initCommand(): Promise<void> {
@@ -11,8 +12,8 @@ export async function initCommand(): Promise<void> {
     const configFileName = getConfigFileName();
     const configPath = path.join(cwd, configFileName);
 
-    const configFile = Bun.file(configPath);
-    if (await configFile.exists()) {
+    const configExists = await access(configPath).then(() => true).catch(() => false);
+    if (configExists) {
       const shouldOverwrite = await p.confirm({
         message: `${configFileName} already exists. Overwrite?`,
       });
@@ -27,7 +28,7 @@ export async function initCommand(): Promise<void> {
     s.start(`Generating ${configFileName}...`);
 
     const template = await generateTemplate();
-    await Bun.write(configPath, template);
+    await writeFile(configPath, template, 'utf-8');
 
     s.stop(`✅ ${configFileName} created`);
 

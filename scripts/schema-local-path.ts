@@ -1,3 +1,4 @@
 import path from "path";
+import { pathToFileURL } from "node:url";
 
-console.log(Bun.pathToFileURL(path.join(process.cwd(), 'schema.json')).href);
+console.log(pathToFileURL(path.join(process.cwd(), 'schema.json')).href);
