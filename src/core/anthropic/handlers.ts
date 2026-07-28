@@ -3,6 +3,7 @@ import type { AnthropicProxy } from './index';
 import { runCodeInterpreter } from './codeInterpreter';
 import { handleLastFailure, handleAllProvidersFailed } from './responses';
 import { handleStreamingResponse } from './streaming';
+import { isStringContentOnlyProvider, normalizeMessagesContentToString } from '../routing/shared';
 
 export async function handleModels( proxy: AnthropicProxy, c: Context ) {
     const { CONFIG } = proxy;
@@ -110,9 +111,12 @@ export async function handleMessages( proxy: AnthropicProxy, c: Context ) {
             try {
                 const convertedRequest = proxy.convertAnthropicRequestToOpenAI( body, selectedModel, 'native' );
                 const withReasoning = proxy.withReasoningEffort( convertedRequest, body, config, selectedModel );
-                const openAIRequest = proxy.isGeminiProvider( config )
+                const openAIRequestRaw = proxy.isGeminiProvider( config )
                     ? proxy.ensureToolCallThoughtSignatures( withReasoning )
                     : withReasoning;
+                const openAIRequest = isStringContentOnlyProvider( config )
+                    ? normalizeMessagesContentToString( openAIRequestRaw )
+                    : openAIRequestRaw;
                 const upstreamEndpoint = proxy.getOpenAIEndpointForAnthropicEndpoint( endpoint );
                 const url = `${proxy.normalizeBaseUrl( config.baseUrl )}/${upstreamEndpoint}`;
                 const upstreamRequestStartedAt = Date.now();

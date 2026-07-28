@@ -4,6 +4,7 @@ import { backendCooldownManager } from '../BackendCooldownManager';
 import { isDebugEnabled, redactForLog } from '@/utils/debug';
 import { formatTimingEntries } from '@/utils/timing';
 import { CONFIG } from '@/utils/schema.lookup';
+import { isStringContentOnlyProvider, normalizeMessagesContentToString } from '../routing/shared';
 import {
     getBackendsForModel,
     getOptimizedBackends,
@@ -112,7 +113,10 @@ export async function runProxyRequest( args: ProxyRequestArgs ): Promise<ProxyRe
 
             const requestWithModel = { ...body, model: selectedModel };
             const withReasoning = withReasoningEffort( requestWithModel, config, selectedModel );
-            const upstreamBody = isGeminiProvider( config ) ? ensureToolCallThoughtSignatures( withGeminiThinking( withReasoning, selectedModel ) ) : stripGeminiOption( withReasoning );
+            const upstreamBodyRaw = isGeminiProvider( config ) ? ensureToolCallThoughtSignatures( withGeminiThinking( withReasoning, selectedModel ) ) : stripGeminiOption( withReasoning );
+            const upstreamBody = isStringContentOnlyProvider( config )
+                ? normalizeMessagesContentToString( upstreamBodyRaw )
+                : upstreamBodyRaw;
 
             const tokens = calculateTokenCount( upstreamBody );
             const rateLimit = getEffectiveRateLimit( config );
@@ -183,6 +187,8 @@ export async function runProxyRequest( args: ProxyRequestArgs ): Promise<ProxyRe
                             rateLimitCompletedAt, upstreamRequestStartedAt, upstreamResponseReceivedAt,
                         },
                     } );
+                    state.providerStats.recordSuccess( config.id, selectedModel, upstreamResponseReceivedAt - upstreamRequestStartedAt );
+                    backendCooldownManager.recordSuccess( config.id );
                     return { response: streamed };
                 }
 
@@ -225,6 +231,7 @@ export async function runProxyRequest( args: ProxyRequestArgs ): Promise<ProxyRe
                 if ( serverTiming ) c.header( 'Server-Timing', serverTiming );
                 console.info( `[${endpoint}] success provider=${config.id} model=${selectedModel} bodyParseMs=${bodyParsedAt - requestStartedAt} webSearchMs=${webSearchCompletedAt - requestStartedAt} rateLimitMs=${rateLimitCompletedAt - requestStartedAt} upstreamMs=${upstreamResponseReceivedAt - upstreamRequestStartedAt} transformMs=${transformMs} totalMs=${totalMs}` );
                 state.providerStats.recordSuccess( config.id, selectedModel, upstreamResponseReceivedAt - upstreamRequestStartedAt );
+                backendCooldownManager.recordSuccess( config.id );
                 return { response: c.json( finalPayload, response.status as any ) };
             } catch ( error: any ) {
                 lastFailure = {
@@ -247,6 +254,5 @@ Attempted backends: ${backends.map( b => b.id ).join( ', ' )}` );
 
     return { lastFailure: lastFailure ?? undefined };
 }
-
 
 

@@ -56,4 +56,59 @@ export function isGeminiProvider( config: AnyProviderConfig ): boolean {
     return config.extra?.isGemini === true;
 }
 
+export function isStringContentOnlyProvider( config: AnyProviderConfig ): boolean {
+    const baseUrl = typeof config?.baseUrl === 'string' ? config.baseUrl.toLowerCase() : '';
+    const id = typeof config?.id === 'string' ? config.id.toLowerCase() : '';
+    const name = typeof config?.name === 'string' ? config.name.toLowerCase() : '';
+    return baseUrl.includes( 'sarvam.ai' ) || id.includes( 'sarvam' ) || name.includes( 'sarvam' );
+}
+
+export function normalizeMessagesContentToString( body: any ): any {
+    if ( !body || typeof body !== 'object' || !Array.isArray( body.messages ) ) return body;
+    let changed = false;
+
+    const messages = body.messages.map( ( message: any ) => {
+        if ( !message || typeof message !== 'object' ) return message;
+        if ( typeof message.content === 'string' || message.content == null ) return message;
+
+        const flattened = flattenMessageContentToString( message.content );
+        changed = true;
+        return { ...message, content: flattened };
+    } );
+
+    return changed ? { ...body, messages } : body;
+}
+
+function flattenMessageContentToString( content: unknown ): string {
+    if ( content == null ) return '';
+    if ( typeof content === 'string' ) return content;
+    if ( Array.isArray( content ) ) {
+        const parts: string[] = [];
+        for ( const item of content ) {
+            if ( typeof item === 'string' ) {
+                parts.push( item );
+                continue;
+            }
+            if ( !item || typeof item !== 'object' ) continue;
+            const block = item as Record<string, unknown>;
+            const type = typeof block.type === 'string' ? block.type : '';
+            if ( typeof block.text === 'string' ) {
+                parts.push( block.text );
+            } else if ( type === 'image_url' || type === 'input_image' ) {
+                parts.push( '[Image attachment]' );
+            } else if ( type === 'input_audio' || type === 'audio' ) {
+                parts.push( '[Audio attachment]' );
+            } else if ( type === 'input_file' || type === 'file' || type === 'document' ) {
+                parts.push( '[File attachment]' );
+            }
+        }
+        return parts.join( '\n' );
+    }
+    if ( typeof content === 'object' ) {
+        const block = content as Record<string, unknown>;
+        if ( typeof block.text === 'string' ) return block.text;
+        return '';
+    }
+    return String( content );
+}
 

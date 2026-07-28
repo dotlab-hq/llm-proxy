@@ -24,6 +24,7 @@ import { isDebugEnabled, redactForLog } from '@/utils/debug';
 import { applySpoofHeaders } from '@/utils/spoofer';
 import { startStreamHeartbeat } from '@/utils/streamHeartbeat';
 import { resolveOpenAIBody, isSkillResolverReady } from './SkillResolver';
+import { isStringContentOnlyProvider, normalizeMessagesContentToString } from './routing/shared';
 import {
     convertResponsesRequestToChat,
     convertChatResponseToResponses,
@@ -48,6 +49,7 @@ export class OpenAIProxy {
     private readonly optimizedBackendCache = new Map<string, { backends: OpenAIModelConfig[]; expiresAt: number }>();
     private static readonly MAX_CACHE_SIZE = 1000;
     private static readonly BACKEND_CACHE_TTL_MS = 30_000;
+    private static readonly MAX_FALLBACK_BACKENDS = 6;  // Cap backends per request to prevent routing loops
 
     constructor() {
         this.app = new Hono();
@@ -1065,9 +1067,12 @@ export class OpenAIProxy {
 
                 const requestWithModel = { ...body, model: selectedModel };
                 const withReasoning = this.withReasoningEffort( requestWithModel, config, selectedModel );
-                const upstreamBody = this.isGeminiProvider( config )
+                const upstreamBodyRaw = this.isGeminiProvider( config )
                     ? this.ensureToolCallThoughtSignatures( this.withGeminiThinking( withReasoning, selectedModel ) )
                     : withReasoning;
+                const upstreamBody = isStringContentOnlyProvider( config )
+                    ? normalizeMessagesContentToString( upstreamBodyRaw )
+                    : upstreamBodyRaw;
 
                 const tokens = this.calculateTokenCount( upstreamBody );
                 const rateLimit = this.getEffectiveRateLimit( config );
@@ -2099,14 +2104,33 @@ export class OpenAIProxy {
             ? fallbackBackends
             : modelIsListed ? [...exactBackends, ...fallbackBackends] : fallbackBackends;
 
+        // Deduplicate by baseUrl so multiple API keys against the same
+        // physical upstream aren't all retried in a single request. Without
+        // this, configs that share a baseUrl (e.g. several Zen keys) cause
+        // severe delays as the proxy iterates through identical endpoints.
+        const deduped = this.dedupeBackendsByBaseUrl( result ).slice( 0, OpenAIProxy.MAX_FALLBACK_BACKENDS );
+
         if ( this.backendRouteCache.size > OpenAIProxy.MAX_CACHE_SIZE ) {
             const firstKey = this.backendRouteCache.keys().next().value;
             if ( firstKey ) {
                 this.backendRouteCache.delete( firstKey );
             }
         }
-        this.backendRouteCache.set( cacheKey, result );
-        return result;
+        this.backendRouteCache.set( cacheKey, deduped );
+        return deduped;
+    }
+
+    private dedupeBackendsByBaseUrl( backends: OpenAIModelConfig[] ): OpenAIModelConfig[] {
+        if ( backends.length <= 1 ) return backends;
+        const seen = new Map<string, OpenAIModelConfig>();
+        for ( const config of backends ) {
+            const key = ( config.baseUrl ?? '' ).replace( /\/+$/, '' ).toLowerCase();
+            const lookupKey = key || `id:${config.id}`;
+            if ( !seen.has( lookupKey ) ) {
+                seen.set( lookupKey, config );
+            }
+        }
+        return Array.from( seen.values() );
     }
 
     private isAutoModel( modelName: string ): boolean {
@@ -3112,9 +3136,12 @@ export class OpenAIProxy {
 
                 const requestWithModel = { ...body, model: selectedModel };
                 const withReasoning = this.withReasoningEffort( requestWithModel, config, selectedModel );
-                const upstreamBody = this.isGeminiProvider( config )
+                const upstreamBodyRaw = this.isGeminiProvider( config )
                     ? this.ensureToolCallThoughtSignatures( this.withGeminiThinking( withReasoning, selectedModel ) )
                     : withReasoning;
+                const upstreamBody = isStringContentOnlyProvider( config )
+                    ? normalizeMessagesContentToString( upstreamBodyRaw )
+                    : upstreamBodyRaw;
 
                 const tokens = this.calculateTokenCount( upstreamBody );
                 const rateLimit = this.getEffectiveRateLimit( config );
@@ -3181,7 +3208,6 @@ export class OpenAIProxy {
 }
 
 export const openAIProxy = new OpenAIProxy();
-
 
 
 

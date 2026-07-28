@@ -13,6 +13,7 @@ import {
     isSttEnabled,
     isTtsEnabled,
 } from '../routing/shared';
+import { backendCooldownManager } from '../BackendCooldownManager';
 
 export {
     isAutoModel,
@@ -28,6 +29,7 @@ export {
 
 const MAX_CACHE_SIZE = 1000;
 const BACKEND_CACHE_TTL_MS = 30_000;
+const MAX_FALLBACK_BACKENDS = 6;  // Cap the number of backends tried per request to prevent routing loops
 
 export function isSttOrImageOnlyConfig( config: OpenAIModelConfig ): boolean {
     return isSttEnabled( config ) || isTtsEnabled( config ) || isImageOnlyConfig( config );
@@ -87,12 +89,46 @@ export function getBackendsForModel(
         ? fallbackBackends
         : modelIsListed ? [...exactBackends, ...fallbackBackends] : fallbackBackends;
 
+    // Deduplicate by baseUrl+apiKey to prevent the routing loop from
+    // trying the same physical upstream multiple times in a single request.
+    // Without this, multiple API keys for the same provider cause severe
+    // delays as the proxy iterates through identical endpoints.
+    const deduped = dedupeBackends( result ).slice( 0, MAX_FALLBACK_BACKENDS );
+
     if ( state.backendRouteCache.size > MAX_CACHE_SIZE ) {
         const firstKey = state.backendRouteCache.keys().next().value;
         if ( firstKey ) state.backendRouteCache.delete( firstKey );
     }
-    state.backendRouteCache.set( cacheKey, result );
-    return result;
+    state.backendRouteCache.set( cacheKey, deduped );
+    return deduped;
+}
+
+/**
+ * Deduplicate backends by their `baseUrl` so that multiple API keys for the
+ * same upstream don't all get tried in a single request. When duplicates are
+ * found, prefer the one with the most recent successful stats.
+ */
+function dedupeBackends( backends: OpenAIModelConfig[] ): OpenAIModelConfig[] {
+    if ( backends.length <= 1 ) return backends;
+    const seen = new Map<string, OpenAIModelConfig>();
+    for ( const config of backends ) {
+        const key = ( config.baseUrl ?? '' ).replace( /\/+$/, '' ).toLowerCase();
+        if ( !key ) {
+            // No baseUrl — keep the entry as-is using id.
+            const fallbackKey = `id:${config.id}`;
+            if ( !seen.has( fallbackKey ) ) seen.set( fallbackKey, config );
+            continue;
+        }
+        const existing = seen.get( key );
+        if ( !existing ) {
+            seen.set( key, config );
+        }
+        // If already seen, skip — we keep the first occurrence. This prevents
+        // sequential retries against the same physical endpoint in a single
+        // request, which previously caused multi-second delays when several
+        // backends shared the same baseUrl.
+    }
+    return Array.from( seen.values() );
 }
 
 function getAndIncrementRoundRobinIndex( state: BackendState, key: string, total: number ): number {
@@ -100,7 +136,7 @@ function getAndIncrementRoundRobinIndex( state: BackendState, key: string, total
 
     if ( state.rrIndexByKey.size > MAX_CACHE_SIZE ) {
         const keys = Array.from( state.rrIndexByKey.keys() );
-        const randomKey = keys[ Math.floor( Math.random() * keys.length ) ];
+        const randomKey = keys[Math.floor( Math.random() * keys.length )];
         state.rrIndexByKey.delete( randomKey! );
     }
 
@@ -115,7 +151,7 @@ export function getRoundRobinBackends( state: BackendState, modelName: string, b
 
     const key = `model:${modelName}`;
     const startIndex = getAndIncrementRoundRobinIndex( state, key, backends.length );
-    return [ ...backends.slice( startIndex ), ...backends.slice( 0, startIndex ) ];
+    return [...backends.slice( startIndex ), ...backends.slice( 0, startIndex )];
 }
 
 export function getOptimizedBackends(
@@ -152,10 +188,40 @@ export function scoreProvider( state: BackendState, config: OpenAIModelConfig, r
     const candidateModels = getCandidateModelsForProvider( state, config, requestedModel );
     const firstModel = candidateModels[0] ?? requestedModel;
     const stats = state.providerStats.getStats( config.id, firstModel );
-    const latencyScore = stats?.latencyEwmaMs ? Math.max( 0, 1 - stats.latencyEwmaMs / 30_000 ) : 0.5;
-    const successScore = stats?.successRateEwma ?? 1;
-    const exactScore = configHasModel( config, requestedModel ) ? 1 : 0;
-    return exactScore * 100 + successScore * 10 + latencyScore + scoreModelSpeedHint( firstModel ) - ( stats?.consecutiveFailures ?? 0 );
+
+    // Exact model match gets top priority
+    const exactScore = configHasModel( config, requestedModel ) ? 100 : 0;
+
+    // Success rate — heavily weighted. Providers with low success get pushed down fast.
+    const successRate = stats?.successRateEwma ?? 1;
+    const successScore = successRate * 40;
+
+    // Failure penalty — consecutive failures get exponentially worse.
+    // A provider failing 3+ times in a row is effectively blacklisted.
+    const consecutiveFailures = stats?.consecutiveFailures ?? 0;
+    const failurePenalty = Math.min( 50, consecutiveFailures * 8 );
+
+    // Latency score — penalize slow providers more aggressively.
+    // Anything above 10s gets heavily penalized.
+    const latencyMs = stats?.latencyEwmaMs ?? 0;
+    const latencyScore = latencyMs > 0 ? Math.max( 0, 20 * ( 1 - latencyMs / 15_000 ) ) : 10;
+
+    // Speed hints (flash-lite, mini, fast models)
+    const speedHint = scoreModelSpeedHint( firstModel );
+
+    // Freshness bonus — prefer providers that haven't been tried recently
+    // This spreads load and avoids hot-spotting on a single provider.
+    const freshnessBonus = stats?.lastUpdatedAt
+        ? Math.min( 5, ( Date.now() - stats.lastUpdatedAt ) / 60_000 )
+        : 3; // No data yet = neutral bonus
+
+    // Sample count penalty — penalize providers we've never successfully used
+    // to prefer known-good providers over unknown ones.
+    const sampleCount = stats?.sampleCount ?? 0;
+    const noveltyPenalty = sampleCount === 0 ? 2 : 0;
+
+    return exactScore + successScore + latencyScore + speedHint + freshnessBonus
+        - failurePenalty - noveltyPenalty;
 }
 
 export function getCandidateModelsForProvider( state: BackendState, config: OpenAIModelConfig, requestedModel: string ): string[] {
@@ -166,8 +232,21 @@ export function getCandidateModelsForProvider( state: BackendState, config: Open
     } );
     const isAutoModelFlag = explicitlyAuto || !modelInThisProvider;
 
+    /**
+     * Filter out models that are currently on cooldown (recently failed).
+     * This prevents the loop from trying a provider-model pair that just errored.
+     */
     const filterHealthy = ( models: string[] ): string[] => {
-        return models;
+        return models.filter( model => {
+            const remainingMs = backendCooldownManager.getRemainingMs( config.id, model );
+            if ( remainingMs > 0 ) return false;
+
+            // Also skip if consecutive failures are too high (>5 failures)
+            const stats = state.providerStats.getStats( config.id, model );
+            if ( stats && stats.consecutiveFailures >= 5 ) return false;
+
+            return true;
+        } );
     };
 
     if ( config.randomRouting === false && !isAutoModelFlag ) {
@@ -188,9 +267,13 @@ export function getCandidateModelsForProvider( state: BackendState, config: Open
 
 function scoreModelForProvider( state: BackendState, config: OpenAIModelConfig, modelName: string ): number {
     const stats = state.providerStats.getStats( config.id, modelName );
-    const latencyScore = stats?.latencyEwmaMs ? Math.max( 0, 1 - stats.latencyEwmaMs / 30_000 ) : 0.5;
-    const successScore = stats?.successRateEwma ?? 1;
-    return successScore * 10 + latencyScore + scoreModelSpeedHint( modelName ) - ( stats?.consecutiveFailures ?? 0 );
+    const successRate = stats?.successRateEwma ?? 1;
+    const successScore = successRate * 30;
+    const latencyMs = stats?.latencyEwmaMs ?? 0;
+    const latencyScore = latencyMs > 0 ? Math.max( 0, 15 * ( 1 - latencyMs / 10_000 ) ) : 7.5;
+    const consecutiveFailures = stats?.consecutiveFailures ?? 0;
+    const failurePenalty = Math.min( 40, consecutiveFailures * 6 );
+    return successScore + latencyScore + scoreModelSpeedHint( modelName ) - failurePenalty;
 }
 
 export function scoreModelSpeedHint( modelName: string ): number {

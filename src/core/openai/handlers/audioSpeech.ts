@@ -98,22 +98,25 @@ export async function handleAudioSpeech( c: Context, state: BackendState ) {
                     if ( wantsStream && upstreamContentType.includes( 'text/event-stream' ) ) {
                         console.info( `[${endpoint}] stream_start provider=${config.id} model=${selectedModel} characters=${characters}` );
                         state.providerStats.recordSuccess( config.id, selectedModel, Date.now() - requestStartedAt );
+                        backendCooldownManager.recordSuccess( config.id );
                         return proxyAudioStreamSSE( c, upstreamResponse, endpoint, config.id, selectedModel );
                     }
 
                     if ( wantsStream && upstreamResponse.body ) {
                         console.info( `[${endpoint}] audio_stream provider=${config.id} model=${selectedModel} characters=${characters}` );
                         state.providerStats.recordSuccess( config.id, selectedModel, Date.now() - requestStartedAt );
+                        backendCooldownManager.recordSuccess( config.id );
                         return streamRawAudio( c, upstreamResponse, upstreamBody.response_format || body?.response_format || 'mp3' );
                     }
 
                     const responseBuffer = await upstreamResponse.arrayBuffer();
                     const effectiveFormat = upstreamBody.response_format || body?.response_format || 'mp3';
                     const mimeMap: Record<string, string> = { mp3: 'audio/mpeg', opus: 'audio/opus', aac: 'audio/aac', flac: 'audio/flac', wav: 'audio/wav', pcm: 'audio/pcm' };
-                    const contentType = mimeMap[ effectiveFormat ] || 'audio/mpeg';
+                    const contentType = mimeMap[effectiveFormat] || 'audio/mpeg';
 
                     console.info( `[${endpoint}] success provider=${config.id} model=${selectedModel} characters=${characters} totalMs=${Date.now() - requestStartedAt}` );
                     state.providerStats.recordSuccess( config.id, selectedModel, Date.now() - requestStartedAt );
+                    backendCooldownManager.recordSuccess( config.id );
                     c.header( 'Content-Type', contentType );
                     return c.body( responseBuffer );
                 } catch ( error: any ) {
@@ -143,7 +146,7 @@ function mapTTSVoice( voice: string, model: string ): string {
     if ( orpheusVoices.has( lower ) ) return lower;
 
     const openaiToOrpheus: Record<string, string> = { alloy: 'troy', echo: 'daniel', fable: 'hannah', onyx: 'austin', nova: 'diana', shimmer: 'autumn' };
-    return openaiToOrpheus[ lower ] ?? 'troy';
+    return openaiToOrpheus[lower] ?? 'troy';
 }
 
 function getUpstreamResponseFormat( config: OpenAIModelConfig, requestedFormat?: string ): string | undefined {
@@ -173,7 +176,7 @@ function proxyAudioStreamSSE( c: Context, upstreamResponse: Response, endpoint: 
     c.header( 'Connection', 'keep-alive' );
     c.header( 'X-Accel-Buffering', 'no' );
     const clientSignal = c.req.raw.signal;
-    const onClientAbort = () => { clientDisconnected = true; upstreamReader.cancel( 'client disconnected' ).catch( () => {} ); };
+    const onClientAbort = () => { clientDisconnected = true; upstreamReader.cancel( 'client disconnected' ).catch( () => { } ); };
     clientSignal.addEventListener( 'abort', onClientAbort, { once: true } );
     const stream = new ReadableStream( {
         start( controller ) {
@@ -201,11 +204,11 @@ function proxyAudioStreamSSE( c: Context, upstreamResponse: Response, endpoint: 
 
 function streamRawAudio( c: Context, upstreamResponse: Response, responseFormat: string ): Response {
     const mimeMap: Record<string, string> = { mp3: 'audio/mpeg', opus: 'audio/opus', aac: 'audio/aac', flac: 'audio/flac', wav: 'audio/wav', pcm: 'audio/pcm' };
-    const contentType = mimeMap[ responseFormat ] || 'audio/mpeg';
+    const contentType = mimeMap[responseFormat] || 'audio/mpeg';
     const upstreamReader = upstreamResponse.body!.getReader();
     let clientDisconnected = false;
     const clientSignal = c.req.raw.signal;
-    const onClientAbort = () => { clientDisconnected = true; upstreamReader.cancel( 'client disconnected' ).catch( () => {} ); };
+    const onClientAbort = () => { clientDisconnected = true; upstreamReader.cancel( 'client disconnected' ).catch( () => { } ); };
     clientSignal.addEventListener( 'abort', onClientAbort, { once: true } );
     const audioStream = new ReadableStream( {
         start( controller ) {

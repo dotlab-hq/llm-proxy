@@ -17,6 +17,7 @@ import { ProviderStatsTracker } from './ProviderStatsTracker';
 import { isDebugEnabled, redactForLog } from '@/utils/debug';
 import { applySpoofHeaders } from '@/utils/spoofer';
 import { resolveAnthropicBody, isSkillResolverReady } from './SkillResolver';
+import { isStringContentOnlyProvider, normalizeMessagesContentToString } from './routing/shared';
 
 type OpenAIModelConfig = NonNullable<Config['models']['openai']>[number];
 type ReasoningEffort = NonNullable<OpenAIModelConfig['default_reasoning']>;
@@ -200,9 +201,12 @@ export class AnthropicProxy {
         try {
           const convertedRequest = convertAnthropicRequestToOpenAI( body, selectedModel, 'native' );
           const withReasoning = this.withReasoningEffort( convertedRequest, body, config, selectedModel );
-          const openAIRequest = this.isGeminiProvider( config )
+          const openAIRequestRaw = this.isGeminiProvider( config )
             ? this.ensureToolCallThoughtSignatures( withReasoning )
             : withReasoning;
+          const openAIRequest = isStringContentOnlyProvider( config )
+            ? normalizeMessagesContentToString( openAIRequestRaw )
+            : openAIRequestRaw;
           const upstreamEndpoint = this.getOpenAIEndpointForAnthropicEndpoint( endpoint );
           const url = `${this.normalizeBaseUrl( config.baseUrl )}/${upstreamEndpoint}`;
           const upstreamRequestStartedAt = Date.now();
@@ -237,6 +241,7 @@ export class AnthropicProxy {
             }
             console.info( `[messages] stream_started provider=${config.id} model=${selectedModel} setupMs=${Date.now() - requestStartedAt} bodyParseMs=${bodyParsedAt - requestStartedAt} webSearchMs=${webSearchCompletedAt - requestStartedAt} upstreamMs=${upstreamResponseReceivedAt - upstreamRequestStartedAt}` );
             this.providerStats.recordSuccess( config.id, selectedModel, upstreamResponseReceivedAt - upstreamRequestStartedAt );
+            backendCooldownManager.recordSuccess( config.id );
 
             // Now enter stream() with the already-fetched response
             c.header( 'Content-Type', 'text/event-stream; charset=utf-8' );
@@ -316,6 +321,7 @@ export class AnthropicProxy {
           }
           console.info( `[messages] success provider=${config.id} model=${selectedModel} bodyParseMs=${bodyParsedAt - requestStartedAt} webSearchMs=${webSearchCompletedAt - requestStartedAt} upstreamMs=${upstreamResponseReceivedAt - upstreamRequestStartedAt} transformMs=${transformMs} totalMs=${totalMs}` );
           this.providerStats.recordSuccess( config.id, selectedModel, upstreamResponseReceivedAt - upstreamRequestStartedAt );
+          backendCooldownManager.recordSuccess( config.id );
           const finalPayload = this.attachUsageIfMissing( endpoint, body, responseWithWebSearch );
           // Multi-turn container passthrough: inject saved container.id so client can continue
           if ( savedContainerId && finalPayload && typeof finalPayload === 'object' && !Array.isArray( finalPayload ) ) {
@@ -573,16 +579,34 @@ export class AnthropicProxy {
   }
 
   private scoreProvider( config: OpenAIModelConfig, requestedModel: string, requiredModalities: readonly Modality[] ): number {
+    // Provider-level health gate: heavily penalize providers on cooldown
+    if ( backendCooldownManager.getProviderHealthScore( config.id ) < 50 ) {
+      return -1000;
+    }
+
     const candidateModels = this.getCandidateModelsForProvider( config, requestedModel, requiredModalities );
+    if ( candidateModels.length === 0 ) {
+      return -500; // No healthy models available from this provider
+    }
     const modelName = candidateModels[0] ?? requestedModel;
     const stats = this.providerStats.getStats( config.id, modelName );
-    const latencyScore = stats?.latencyEwmaMs ? Math.max( 0, 1 - stats.latencyEwmaMs / 30000 ) : 0.5;
-    const successScore = stats?.successRateEwma ?? 1;
+
     const exactScore = this.configHasModel( config, requestedModel ) ? 1 : 0;
-    return exactScore * 100 + successScore * 10 + latencyScore - ( stats?.consecutiveFailures ?? 0 );
+    const successScore = ( stats?.successRateEwma ?? 1 ) * 40;
+    const latencyScore = stats?.latencyEwmaMs ? Math.max( 0, 1 - stats.latencyEwmaMs / 30000 ) * 20 : 10;
+    const failurePenalty = Math.min( 50, ( stats?.consecutiveFailures ?? 0 ) * 8 );
+    const healthScore = backendCooldownManager.getProviderHealthScore( config.id );
+    const freshnessBonus = Math.max( 0, 5 - ( stats ? ( Date.now() - stats.lastUpdatedAt ) / 60000 : 5 ) );
+
+    return exactScore * 100 + successScore + latencyScore + healthScore / 2 + freshnessBonus - failurePenalty;
   }
 
   private getCandidateModelsForProvider( config: OpenAIModelConfig, requestedModel: string, requiredModalities: readonly Modality[] = ['text'] ): string[] {
+    // Provider-level health gate: skip entire provider if it is unhealthy
+    if ( backendCooldownManager.getProviderHealthScore( config.id ) < 50 ) {
+      return [];
+    }
+
     const explicitlyAuto = this.isAutoModel( requestedModel );
     const modelInThisProvider = config.models.some( m => {
       const candidate = typeof m === 'string' ? m : ( m as any ).model;
@@ -592,7 +616,14 @@ export class AnthropicProxy {
     const isAutoModel = explicitlyAuto || !modelInThisProvider;
 
     if ( config.randomRouting === false && !isAutoModel && this.modelSupportsModalities( config, requestedModel, requiredModalities ) ) {
-      return [requestedModel];
+      // Still apply health filter for non-random routing
+      if ( !backendCooldownManager.isOnCooldown( config.id, requestedModel ) ) {
+        const stats = this.providerStats.getStats( config.id, requestedModel );
+        if ( !stats || stats.consecutiveFailures < 5 ) {
+          return [requestedModel];
+        }
+      }
+      // Fall through to try other models if requested model is unhealthy
     }
 
     const modelNames = config.models
@@ -606,8 +637,22 @@ export class AnthropicProxy {
       return [requestedModel];
     }
 
-    const startIndex = Math.floor( Math.random() * uniqueModels.length );
-    return [...uniqueModels.slice( startIndex ), ...uniqueModels.slice( 0, startIndex )];
+    // Filter out unhealthy models (on cooldown or with too many consecutive failures)
+    const healthyModels = uniqueModels.filter( model => {
+      if ( backendCooldownManager.isOnCooldown( config.id, model ) ) {
+        return false;
+      }
+      const stats = this.providerStats.getStats( config.id, model );
+      if ( stats && stats.consecutiveFailures >= 5 ) {
+        return false;
+      }
+      return true;
+    } );
+
+    const modelsToUse = healthyModels.length > 0 ? healthyModels : uniqueModels;
+
+    const startIndex = Math.floor( Math.random() * modelsToUse.length );
+    return [...modelsToUse.slice( startIndex ), ...modelsToUse.slice( 0, startIndex )];
   }
 
   private getRequiredModalities( body: any ): Modality[] {

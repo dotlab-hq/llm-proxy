@@ -2,6 +2,7 @@ import { rateLimitManager } from '../RateLimitManager';
 import { backendCooldownManager } from '../BackendCooldownManager';
 import { fetchWithProxy } from '@/utils/proxyFetch';
 import { CONFIG } from '@/utils/schema.lookup';
+import { isStringContentOnlyProvider, normalizeMessagesContentToString } from '../routing/shared';
 import {
     getBackendsForModel,
     getOptimizedBackends,
@@ -68,7 +69,10 @@ export async function processUpstreamWithFallback(
 
             const requestWithModel = { ...body, model: selectedModel };
             const withReasoning = withReasoningEffort( requestWithModel, config, selectedModel );
-            const upstreamBody = isGeminiProvider( config ) ? ensureToolCallThoughtSignatures( withGeminiThinking( withReasoning, selectedModel ) ) : stripGeminiOption( withReasoning );
+            const upstreamBodyRaw = isGeminiProvider( config ) ? ensureToolCallThoughtSignatures( withGeminiThinking( withReasoning, selectedModel ) ) : stripGeminiOption( withReasoning );
+            const upstreamBody = isStringContentOnlyProvider( config )
+                ? normalizeMessagesContentToString( upstreamBodyRaw )
+                : upstreamBodyRaw;
 
             const tokens = calculateTokenCount( upstreamBody );
             const rateLimit = getEffectiveRateLimit( config );
@@ -127,6 +131,5 @@ export async function processUpstreamWithFallback(
         payload: { error: { message: 'All providers failed', type: 'internal_error' } },
     };
 }
-
 
 

@@ -70,11 +70,11 @@ async function handleAudioRequest( c: Context, state: BackendState, endpoint: st
                     const streamField = formData.get( 'stream' );
                     const wantsStream = streamField === 'true' || streamField === '1';
 
-                    const boundary = `----AIEDGE${ Math.random().toString( 36 ).slice( 2 ) }`;
+                    const boundary = `----AIEDGE${Math.random().toString( 36 ).slice( 2 )}`;
                     const parts: ( string | Buffer )[] = [];
 
                     function appendText( name: string, value: string ) {
-                        parts.push( `--${ boundary }\r\n`, `Content-Disposition: form-data; name="${ name }"\r\n\r\n`, `${ value }\r\n` );
+                        parts.push( `--${boundary}\r\n`, `Content-Disposition: form-data; name="${name}"\r\n\r\n`, `${value}\r\n` );
                     }
 
                     appendText( 'model', selectedModel );
@@ -82,9 +82,9 @@ async function handleAudioRequest( c: Context, state: BackendState, endpoint: st
                     const fileBuffer = Buffer.from( await file.arrayBuffer() );
                     const fileName = file.name || 'audio.wav';
                     const fileType = file.type || 'audio/wav';
-                    parts.push( `--${ boundary }\r\n`, `Content-Disposition: form-data; name="file"; filename="${ fileName }"\r\n`, `Content-Type: ${ fileType }\r\n\r\n`, fileBuffer, `\r\n` );
+                    parts.push( `--${boundary}\r\n`, `Content-Disposition: form-data; name="file"; filename="${fileName}"\r\n`, `Content-Type: ${fileType}\r\n\r\n`, fileBuffer, `\r\n` );
 
-                    const textFields = [ 'language', 'prompt', 'response_format', 'temperature' ] as const;
+                    const textFields = ['language', 'prompt', 'response_format', 'temperature'] as const;
                     for ( const field of textFields ) {
                         const val = formData.get( field );
                         if ( val ) appendText( field, val as string );
@@ -98,14 +98,14 @@ async function handleAudioRequest( c: Context, state: BackendState, endpoint: st
                     for ( const name of formData.getAll( 'known_speaker_names[]' ) ) appendText( 'known_speaker_names[]', name as string );
                     for ( const ref of formData.getAll( 'known_speaker_references[]' ) ) appendText( 'known_speaker_references[]', ref as string );
 
-                    parts.push( `--${ boundary }--\r\n` );
+                    parts.push( `--${boundary}--\r\n` );
                     const upstreamBody = Buffer.concat( parts.map( p => typeof p === 'string' ? Buffer.from( p ) : p ) );
 
                     console.info( `[${endpoint}] upstream_request provider=${config.id} model=${selectedModel} audioSeconds=${audioSeconds} stream=${wantsStream}` );
 
                     const upstreamResponse = await fetchWithProxy( url, {
                         method: 'POST',
-                        headers: { 'Authorization': `Bearer ${config.apiKey}`, 'Content-Type': `multipart/form-data; boundary=${ boundary }`, 'User-Agent': 'ai-edge/1.0' },
+                        headers: { 'Authorization': `Bearer ${config.apiKey}`, 'Content-Type': `multipart/form-data; boundary=${boundary}`, 'User-Agent': 'ai-edge/1.0' },
                         body: upstreamBody,
                     }, CONFIG.proxy, { skipTimeout: wantsStream } );
 
@@ -128,12 +128,14 @@ async function handleAudioRequest( c: Context, state: BackendState, endpoint: st
                     if ( wantsStream && upstreamContentType.includes( 'text/event-stream' ) ) {
                         console.info( `[${endpoint}] stream_start provider=${config.id} model=${selectedModel} audioSeconds=${audioSeconds}` );
                         state.providerStats.recordSuccess( config.id, selectedModel, Date.now() - requestStartedAt );
+                        backendCooldownManager.recordSuccess( config.id );
                         return proxyAudioStream( c, upstreamResponse, endpoint, config.id, selectedModel );
                     }
 
                     const responseText = await upstreamResponse.text();
                     console.info( `[${endpoint}] success provider=${config.id} model=${selectedModel} audioSeconds=${audioSeconds} totalMs=${Date.now() - requestStartedAt}` );
                     state.providerStats.recordSuccess( config.id, selectedModel, Date.now() - requestStartedAt );
+                    backendCooldownManager.recordSuccess( config.id );
 
                     if ( upstreamContentType.includes( 'text/plain' ) || upstreamContentType.includes( 'text/vtt' ) || upstreamContentType.includes( 'application/x-subrip' ) ) {
                         c.header( 'Content-Type', upstreamContentType );
@@ -208,7 +210,7 @@ export function proxyAudioStream( c: Context, upstreamResponse: Response, endpoi
     const clientSignal = c.req.raw.signal;
     const onClientAbort = () => {
         clientDisconnected = true;
-        upstreamReader.cancel( 'client disconnected' ).catch( () => {} );
+        upstreamReader.cancel( 'client disconnected' ).catch( () => { } );
     };
     clientSignal.addEventListener( 'abort', onClientAbort, { once: true } );
 
