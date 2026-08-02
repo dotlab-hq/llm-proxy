@@ -2,7 +2,7 @@ import type { Context } from 'hono';
 import { stream } from 'hono/streaming';
 import { createStreamState } from './processing';
 import { consumeSseBlocks, processSseBlockSync } from './processing';
-import { finishStreamSync, sendErrorEventSync, flushOut } from './events';
+import { finishStreamSync, sendErrorEventSync, sendPingEventSync, flushOut } from './events';
 
 export async function streamOpenAIResponseAsAnthropic(
     c: Context,
@@ -40,7 +40,8 @@ export async function streamOpenAIResponseAsAnthropic(
         clientSignal.addEventListener( 'abort', onClientAbort, { once: true } );
 
         try {
-            const initialOut: string[] = [': stream-start\n\n'];
+            const initialOut: string[] = [': stream-start\n\n' ];
+            sendPingEventSync( state, initialOut );
             await flushOut( initialOut, streamWriter );
 
             while ( !clientDisconnected ) {
@@ -155,6 +156,16 @@ export async function relayUpstreamToStreamWriter(
     clientSignal.addEventListener( 'abort', onClientAbort, { once: true } );
 
     try {
+        // Send an immediate keepalive so the client knows the connection is alive
+        // while we wait for the upstream to produce its first chunk. Without this,
+        // idle timeouts on the harness/client fire before data arrives, causing
+        // spurious retries.
+        {
+            const pingOut: string[] = [];
+            sendPingEventSync( state, pingOut );
+            await flushOut( pingOut, streamWriter );
+        }
+
         while ( !clientDisconnected ) {
             const { done, value } = await reader.read();
             if ( done ) {

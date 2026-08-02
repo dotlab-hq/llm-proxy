@@ -93,6 +93,7 @@ export async function handleStreaming( args: StreamingArgs ): Promise<Response> 
         }, async ( err, streamWriter ) => {
             console.error( `[${endpoint}] Streaming error: ${err?.message || String( err )}` );
             await streamWriter.writeln( `data: ${JSON.stringify( { error: { message: err?.message || 'An error occurred during streaming', type: 'upstream_error' } } )}\n` );
+            await streamWriter.writeln( 'data: [DONE]\n\n' );
         } );
     }
 
