@@ -1,6 +1,8 @@
 const DEFAULT_COOLDOWN_MS = 2_000;   // Reduced from 5s to 2s for faster recovery
 const AUTH_FAIL_COOLDOWN_MS = 30_000;  // Reduced from 60s to 30s
 const HEALTHY_THRESHOLD_MS = 300_000;  // 5min — forget provider-level cooldown after this
+const MODEL_BACKOFF_CAP_MS = 30_000;   // Max model-level cooldown
+const MODEL_BACKOFF_BASE_MS = 2_000;   // Starting model cooldown
 
 export function isRetryableUpstreamStatus( status: number ): boolean {
     return status === 401 || status === 429 || ( status >= 500 && status <= 599 );
@@ -17,6 +19,7 @@ export class BackendCooldownManager {
     private readonly blockedUntilByKey = new Map<string, number>();
     private readonly providerFailureCounts = new Map<string, { count: number; lastFailure: number }>();
     private readonly providerBlockedUntil = new Map<string, number>();
+    private readonly modelFailureCounts = new Map<string, { count: number; lastFailure: number }>();
 
     constructor( private readonly defaultCooldownMs: number = DEFAULT_COOLDOWN_MS ) { }
 
@@ -28,6 +31,17 @@ export class BackendCooldownManager {
         }
         const effective = cooldownMs ?? ( status === 401 ? AUTH_FAIL_COOLDOWN_MS : this.defaultCooldownMs );
         this.markCooldown( providerId, modelName, effective );
+
+        // Track model-level failures for escalating cooldown
+        const modelKey = this.buildKey( providerId, modelName );
+        const modelRecord = this.modelFailureCounts.get( modelKey ) ?? { count: 0, lastFailure: Date.now() };
+        modelRecord.count += 1;
+        modelRecord.lastFailure = Date.now();
+        this.modelFailureCounts.set( modelKey, modelRecord );
+
+        // Escalating model cooldown: 2s, 4s, 6s, 8s... capped at 30s
+        const modelBackoffMs = Math.min( MODEL_BACKOFF_CAP_MS, modelRecord.count * MODEL_BACKOFF_BASE_MS );
+        this.markCooldown( providerId, modelName, modelBackoffMs );
 
         // Track provider-level failures for cascading cooldown
         const providerRecord = this.providerFailureCounts.get( providerId ) ?? { count: 0, lastFailure: Date.now() };
@@ -114,12 +128,34 @@ export class BackendCooldownManager {
     }
 
     /**
-     * Clears provider-level cooldown after a successful request.
-     * Call this when a request to this provider succeeds.
+     * Decays provider-level failure state after a successful request.
+     * Instead of full clear, reduces failure count by half so flaky providers
+     * don't get an instant clean slate (they'd need 3+ fresh failures to re-trigger).
      */
     recordSuccess( providerId: string ): void {
-        this.providerFailureCounts.delete( providerId );
         this.providerBlockedUntil.delete( providerId );
+        const record = this.providerFailureCounts.get( providerId );
+        if ( record ) {
+            record.count = Math.max( 0, Math.floor( record.count / 2 ) );
+            if ( record.count === 0 ) {
+                this.providerFailureCounts.delete( providerId );
+            }
+        }
+    }
+
+    /**
+     * Returns the model-level failure count for scoring adjustments.
+     */
+    getModelFailureCount( providerId: string, modelName: string ): number {
+        const modelKey = this.buildKey( providerId, modelName );
+        const record = this.modelFailureCounts.get( modelKey );
+        if ( !record ) return 0;
+        // Decay stale records
+        if ( Date.now() - record.lastFailure > HEALTHY_THRESHOLD_MS ) {
+            this.modelFailureCounts.delete( modelKey );
+            return 0;
+        }
+        return record.count;
     }
 
     private buildKey( providerId: string, modelName: string ): string {

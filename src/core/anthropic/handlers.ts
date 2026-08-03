@@ -4,7 +4,16 @@ import { runCodeInterpreter } from './codeInterpreter';
 import { handleLastFailure, handleAllProvidersFailed } from './responses';
 import { handleStreamingResponse } from './streaming';
 import { isStringContentOnlyProvider, normalizeMessagesContentToString } from '../routing/shared';
+import { HedgedDispatcher, HedgedDispatchExhaustedError } from '../HedgedDispatcher';
 
+const STREAM_HEDGE_WIDTH = 2;
+
+type StreamingCandidate = {
+    config: any;
+    selectedModel: string;
+    openAIRequest: any;
+    url: string;
+};
 export async function handleModels( proxy: AnthropicProxy, c: Context ) {
     const { CONFIG } = proxy;
     try {
@@ -84,7 +93,96 @@ export async function handleMessages( proxy: AnthropicProxy, c: Context ) {
     const backendIds = backends.map( b => b.id ).join( ', ' );
     console.error( `[${endpoint}] Attempting OpenAI backends for model ${requestedModel}: ${backendIds}` );
 
-    for ( const config of backends ) {
+    // Stream attempts used to run strictly one after another. A slow 4xx/5xx
+    // response therefore stalled fallback even though other providers were ready.
+    // Race two response-header attempts; failures immediately start the next
+    // candidate and the loser is aborted once one provider is usable.
+    if ( body.stream === true ) {
+        const streamingCandidates: StreamingCandidate[] = [];
+        for ( const config of backends ) {
+            for ( const selectedModel of proxy.getCandidateModelsForProvider( config, requestedModel, requiredModalities ) ) {
+                if ( proxy.backendCooldownManager.getRemainingMs( config.id, selectedModel ) > 0 ) continue;
+
+                const convertedRequest = proxy.convertAnthropicRequestToOpenAI( body, selectedModel, 'native' );
+                const withReasoning = proxy.withReasoningEffort( convertedRequest, body, config, selectedModel );
+                const openAIRequestRaw = proxy.isGeminiProvider( config )
+                    ? proxy.ensureToolCallThoughtSignatures( withReasoning )
+                    : withReasoning;
+                const openAIRequest = isStringContentOnlyProvider( config )
+                    ? normalizeMessagesContentToString( openAIRequestRaw )
+                    : openAIRequestRaw;
+                streamingCandidates.push( {
+                    config,
+                    selectedModel,
+                    openAIRequest,
+                    url: `${proxy.normalizeBaseUrl( config.baseUrl )}/${proxy.getOpenAIEndpointForAnthropicEndpoint( endpoint )}`,
+                } );
+            }
+        }
+
+        try {
+            const result = await new HedgedDispatcher( { defaultMaxWidth: STREAM_HEDGE_WIDTH } ).dispatch(
+                streamingCandidates,
+                async ( candidate, dispatchContext ) => {
+                    const tokens = proxy.calculateTokenCount( body );
+                    const rateCheck = await proxy.rateLimitManager.checkAndConsume(
+                        candidate.config.id, tokens, proxy.getEffectiveRateLimit( candidate.config ), candidate.selectedModel,
+                    );
+                    if ( !rateCheck.allowed ) {
+                        throw Object.assign( new Error( `Rate limit exceeded for ${candidate.config.id}` ), { status: 429 } );
+                    }
+
+                    const attemptStartedAt = Date.now();
+                    console.info( `[${endpoint}] attempt_started provider=${candidate.config.id} model=${candidate.selectedModel} rank=${dispatchContext.rank}` );
+                    try {
+                        const response = await proxy.fetchWithProxy( candidate.url, {
+                            method: 'POST',
+                            headers: proxy.buildHeaders( candidate.config, true ),
+                            body: JSON.stringify( candidate.openAIRequest ),
+                            signal: dispatchContext.signal,
+                        }, proxy.CONFIG.proxy, { skipTimeout: true } );
+                        const elapsedMs = Date.now() - attemptStartedAt;
+                        proxy.backendCooldownManager.markFromStatus( candidate.config.id, candidate.selectedModel, response.status );
+                        const contentType = response.headers.get( 'content-type' ) ?? '';
+                        if ( !response.ok || !response.body || !contentType.includes( 'text/event-stream' ) ) {
+                            response.body?.cancel().catch( () => {} );
+                            proxy.providerStats.recordFailure( candidate.config.id, candidate.selectedModel, elapsedMs );
+                            console.warn( `[${endpoint}] attempt_failed provider=${candidate.config.id} model=${candidate.selectedModel} status=${response.status} elapsedMs=${elapsedMs} rank=${dispatchContext.rank}` );
+                            throw Object.assign( new Error( `${response.status} from ${candidate.config.id}` ), { status: response.status } );
+                        }
+                        return { ...candidate, response, upstreamRequestStartedAt: attemptStartedAt, upstreamResponseReceivedAt: Date.now() };
+                    } catch ( error: any ) {
+                        if ( error?.name !== 'AbortError' ) {
+                            console.warn( `[${endpoint}] attempt_error provider=${candidate.config.id} model=${candidate.selectedModel} elapsedMs=${Date.now() - attemptStartedAt} rank=${dispatchContext.rank} error=${error?.message || String( error )}` );
+                        }
+                        throw error;
+                    }
+                },
+                { signal: c.req.raw.signal },
+            );
+
+            const winner = result.value;
+            console.info( `[${endpoint}] hedge_winner provider=${winner.config.id} model=${winner.selectedModel} rank=${result.rank} attempts=${result.attemptedCount}` );
+            proxy.backendCooldownManager.recordSuccess( winner.config.id );
+            return handleStreamingResponse(
+                proxy, c, winner.response, winner.config, winner.selectedModel, requestedModel,
+                webSearchContext.searchResponse, requestStartedAt, bodyParsedAt, webSearchCompletedAt,
+                winner.upstreamResponseReceivedAt, winner.upstreamRequestStartedAt,
+            );
+        } catch ( error: any ) {
+            if ( error?.name === 'AbortError' ) {
+                return c.json( { error: { message: 'Request cancelled', type: 'request_cancelled' } }, 499 as any );
+            }
+            if ( error instanceof HedgedDispatchExhaustedError ) {
+                const last = error.failures.at( -1 )?.error as { status?: number } | undefined;
+                lastFailure = { status: last?.status ?? 502, payload: { error: { message: 'All streaming upstream attempts failed', type: 'upstream_error' } } };
+            } else {
+                lastFailure = { status: error?.status ?? 502, payload: { error: { message: error?.message || 'Upstream request failed', type: 'upstream_error' } } };
+            }
+        }
+    }
+
+    for ( const config of body.stream === true ? [] : backends ) {
         const candidateModels = proxy.getCandidateModelsForProvider( config, requestedModel, requiredModalities );
 
         for ( const selectedModel of candidateModels ) {

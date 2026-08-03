@@ -28,7 +28,7 @@ export {
 };
 
 const MAX_CACHE_SIZE = 1000;
-const BACKEND_CACHE_TTL_MS = 30_000;
+const BACKEND_CACHE_TTL_MS = 10_000;  // Reduced from 30s for faster recovery when providers change health
 const MAX_FALLBACK_BACKENDS = 6;  // Cap the number of backends tried per request to prevent routing loops
 
 export function isSttOrImageOnlyConfig( config: OpenAIModelConfig ): boolean {
@@ -93,7 +93,9 @@ export function getBackendsForModel(
     // trying the same physical upstream multiple times in a single request.
     // Without this, multiple API keys for the same provider cause severe
     // delays as the proxy iterates through identical endpoints.
+    console.info( `[routing] getBackendsForModel pre-dedup count=${result.length} ids=${result.map( b => b.id ).join( ', ' )}` );
     const deduped = dedupeBackends( result ).slice( 0, MAX_FALLBACK_BACKENDS );
+    console.info( `[routing] getBackendsForModel post-dedup count=${deduped.length} ids=${deduped.map( b => b.id ).join( ', ' )}` );
 
     if ( state.backendRouteCache.size > MAX_CACHE_SIZE ) {
         const firstKey = state.backendRouteCache.keys().next().value;
@@ -112,9 +114,12 @@ function dedupeBackends( backends: OpenAIModelConfig[] ): OpenAIModelConfig[] {
     if ( backends.length <= 1 ) return backends;
     const seen = new Map<string, OpenAIModelConfig>();
     for ( const config of backends ) {
-        const key = ( config.baseUrl ?? '' ).replace( /\/+$/, '' ).toLowerCase();
-        if ( !key ) {
-            // No baseUrl — keep the entry as-is using id.
+        // Use a composite key: baseUrl + apiKey to keep different API keys as separate backends
+        // This allows hedged dispatch to race different zen instances in parallel
+        const baseUrl = ( config.baseUrl ?? '' ).replace( /\/+$/, '' ).toLowerCase();
+        const apiKey = ( config.apiKey ?? '' ).substring( 0, 12 ); // Use prefix to keep distinct keys separate
+        const key = `${baseUrl}::${apiKey}`;
+        if ( !key || key === '::' ) {
             const fallbackKey = `id:${config.id}`;
             if ( !seen.has( fallbackKey ) ) seen.set( fallbackKey, config );
             continue;
@@ -122,11 +127,9 @@ function dedupeBackends( backends: OpenAIModelConfig[] ): OpenAIModelConfig[] {
         const existing = seen.get( key );
         if ( !existing ) {
             seen.set( key, config );
+            continue;
         }
-        // If already seen, skip — we keep the first occurrence. This prevents
-        // sequential retries against the same physical endpoint in a single
-        // request, which previously caused multi-second delays when several
-        // backends shared the same baseUrl.
+        // Same physical endpoint AND same API key — keep first occurrence
     }
     return Array.from( seen.values() );
 }
