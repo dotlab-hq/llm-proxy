@@ -89,6 +89,30 @@ export function getBucketUsage(
     } : null );
 }
 
+/**
+ * Refill-aware meter peek (read-only, no consumption). Used for preemptive
+ * TPM hopping: estimates the tokens available RIGHT NOW by applying the same
+ * token-bucket refill math as checkAndConsume, without mutating the record.
+ * Returns null when no bucket exists yet (nothing configured/consumed yet →
+ * caller should treat it as unlimited and proceed).
+ */
+export function peekRemaining( key: string, rateLimit: RateLimit | undefined ): Promise<number | null> {
+    if ( !rateLimit ) return Promise.resolve( null );
+    const hasTokensPerMinute = typeof rateLimit.tokensPerMinute === 'number';
+    const hasRequestsPerMinute = typeof rateLimit.requestsPerMinute === 'number';
+    const tokenLimit = hasTokensPerMinute
+        ? ( rateLimit.tokensPerMinute as number )
+        : ( hasRequestsPerMinute ? ( rateLimit.requestsPerMinute as number ) : 0 );
+    if ( tokenLimit <= 0 ) return Promise.resolve( null );
+    return CACHE.getKey<BucketRecord>( key ).then( record => {
+        if ( !record ) return null;
+        const now = Date.now();
+        const tokensPerSecond = tokenLimit / 60;
+        const refillAmount = ( now - record.lastRefill ) / 1000 * tokensPerSecond;
+        return Math.ceil( Math.min( tokenLimit, record.tokens + refillAmount ) );
+    } );
+}
+
 export function resetBucket( key: string ): Promise<void> {
     return CACHE.setKey( key, emptyBucket() );
 }

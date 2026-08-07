@@ -51,6 +51,7 @@ export class OpenAIProxy {
     private static readonly MAX_CACHE_SIZE = 1000;
     private static readonly BACKEND_CACHE_TTL_MS = 30_000;
     private static readonly MAX_FALLBACK_BACKENDS = 6;  // Cap backends per request to prevent routing loops
+    private static readonly MAX_SIBLING_MODELS_PER_PROVIDER = 4;  // Cap sibling-model substitution per provider in the last-resort pass
 
     constructor() {
         this.app = new Hono();
@@ -973,7 +974,18 @@ export class OpenAIProxy {
         return !available.has( selectedName );
     }
 
-    private getEffectiveRateLimit( config: OpenAIModelConfig ): Config['rateLimit'] | undefined {
+    private getEffectiveRateLimit( config: OpenAIModelConfig, selectedModel?: string ): Config['rateLimit'] | undefined {
+        // Per-model rate limit (models array entries can carry their own
+        // rateLimit — the gemini providers use this) takes precedence over
+        // the provider-level / global limit.
+        if ( selectedModel ) {
+            const entry = config.models.find( m =>
+                typeof m !== 'string' && ( m as any ).model === selectedModel && ( m as any ).rateLimit
+            );
+            if ( entry && typeof entry !== 'string' ) {
+                return ( entry as any ).rateLimit;
+            }
+        }
         if ( config.individualLimit && config.rateLimit ) {
             return config.rateLimit;
         }
@@ -1056,11 +1068,44 @@ export class OpenAIProxy {
         const backendIds = backends.map( b => b.id ).join( ', ' );
         console.error( `[${endpoint}] Attempting backends for model ${modelName}: ${backendIds}` );
 
+        // Two-pass attempt plan:
+        //   Pass 1: the exact requested model across every in-group backend.
+        //   Pass 2 (last resort): when pass 1 is fully consumed without a
+        //   success, participating (randomRouting !== false) providers in the
+        //   same group offer their best sibling models as substitution — the
+        //   return benefit of taking part in random routing.
+        const attempts: { config: OpenAIModelConfig; selectedModel: string }[] = [];
         for ( const config of backends ) {
             const candidateModels = this.getCandidateModelsForProvider( config, modelName );
-
             for ( const selectedModel of candidateModels ) {
-                const cooldownRemainingMs = backendCooldownManager.getRemainingMs( config.id, selectedModel );
+                attempts.push( { config, selectedModel } );
+            }
+        }
+        const isAutoEdgeRequest = this.isAutoModel( modelName )
+            || !( CONFIG.models.openai ?? [] ).some( c => this.configHasModel( c, modelName ) );
+        let attemptIdx = 0;
+        let siblingPassAppended = false;
+
+        while ( true ) {
+            if ( attemptIdx >= attempts.length ) {
+                // Pass 1 fully consumed and no success (success returns early).
+                if ( !siblingPassAppended && !isAutoEdgeRequest ) {
+                    siblingPassAppended = true;
+                    console.error( `[${endpoint}] In-group backends exhausted for ${modelName} — sibling pass (random-routing participants)` );
+                    for ( const config of backends ) {
+                        const siblings = this.getCandidateModelsForProvider( config, modelName, true );
+                        for ( const siblingModel of siblings ) {
+                            attempts.push( { config, selectedModel: siblingModel } );
+                        }
+                    }
+                } else {
+                    break;
+                }
+            }
+            if ( attemptIdx >= attempts.length ) break;
+            const { config, selectedModel } = attempts[attemptIdx]!;
+            attemptIdx++;
+            const cooldownRemainingMs = backendCooldownManager.getRemainingMs( config.id, selectedModel );
                 if ( cooldownRemainingMs > 0 ) {
                     console.warn( `[${endpoint}] cooldown_active provider=${config.id} model=${selectedModel} remainingMs=${cooldownRemainingMs}` );
                     continue;
@@ -1076,7 +1121,22 @@ export class OpenAIProxy {
                     : upstreamBodyRaw;
 
                 const tokens = this.calculateTokenCount( upstreamBody );
-                const rateLimit = this.getEffectiveRateLimit( config );
+                const rateLimit = this.getEffectiveRateLimit( config, selectedModel );
+                // ── Preemptive TPM-meter hop ──
+                // Gemini providers have very low tokens-per-minute limits. Peek
+                // the token bucket BEFORE attempting upstream: if the meter
+                // can't cover this request, hop to the next (provider, model)
+                // turn immediately instead of burning an upstream call and
+                // waiting for a 429. Turn-wise rotation + same-group isolation
+                // stay intact; sibling substitution (pass 2) picks up when
+                // every provider's exact-model meter is low.
+                if ( this.isGeminiProvider( config ) && rateLimit ) {
+                    const meterRemaining = await rateLimitManager.peekRemaining( config.id, rateLimit, selectedModel );
+                    if ( meterRemaining !== null && meterRemaining < tokens ) {
+                        console.error( `[${endpoint}] TPM meter low provider=${config.id} model=${selectedModel} remaining=${meterRemaining} need=${tokens} — preemptive hop` );
+                        continue;
+                    }
+                }
                 const rateCheck = await rateLimitManager.checkAndConsume(
                     config.id,
                     tokens,
@@ -1124,7 +1184,7 @@ export class OpenAIProxy {
                     backendCooldownManager.markFromStatus( config.id, selectedModel, response.status );
                     if ( response.status === 429 ) {
                         this.providerStats.recordFailure( config.id, selectedModel, upstreamResponseReceivedAt - upstreamRequestStartedAt );
-                        break;
+                        continue;
                     }
 
                     if ( this.isRedirectStatus( response.status ) ) {
@@ -1158,7 +1218,7 @@ export class OpenAIProxy {
                         if ( isStreamingResponses ) {
                             return this.sendResponsesStreamError( selectedModel, lastFailure.payload?.error?.message || `Upstream returned ${response.status}` );
                         }
-                        break;
+                        continue;
                     }
 
                     // Some upstreams return HTTP 200 with a JSON error body
@@ -1178,7 +1238,7 @@ export class OpenAIProxy {
                             if ( originalResponsesBody ) {
                                 return this.sendResponsesStreamError( selectedModel, typeof errorMsg === 'string' ? errorMsg : JSON.stringify( errorMsg ) );
                             }
-                            break;
+                            continue;
                         }
                         // Non-error JSON response in streaming — unusual but
                         // fall through to let the normal non-streaming path
@@ -1285,7 +1345,7 @@ export class OpenAIProxy {
                         };
                         this.providerStats.recordFailure( config.id, selectedModel, upstreamResponseReceivedAt - upstreamRequestStartedAt );
                         console.error( `[${endpoint}] ${response.status} from ${config?.id ?? config?.name}` );
-                        break;
+                        continue;
                     }
 
                     // Some upstreams return HTTP 200 with an error payload
@@ -1299,7 +1359,7 @@ export class OpenAIProxy {
                         };
                         this.providerStats.recordFailure( config.id, selectedModel, upstreamResponseReceivedAt - upstreamRequestStartedAt );
                         console.error( `[${endpoint}] upstream_error_in_body from ${config?.id ?? config?.name}: ${typeof errorMsg === 'string' ? errorMsg.slice( 0, 200 ) : JSON.stringify( errorMsg ).slice( 0, 200 )}` );
-                        break;
+                        continue;
                     }
 
                     // Convert chat/completions response back to Responses format if needed
@@ -1342,10 +1402,9 @@ export class OpenAIProxy {
                         }
                     };
                     console.error( `[${endpoint}] Exception from ${config?.id ?? config?.name}: ${error?.message || String( error )}` );
-                    break;
+                    continue;
                 }
             }
-        }
 
         if ( lastFailure ) {
             const errorPayload = typeof lastFailure.payload === 'object' ? JSON.stringify( lastFailure.payload ) : String( lastFailure.payload );
@@ -1852,7 +1911,7 @@ export class OpenAIProxy {
         const { tools } = stripCodeInterpreterTools( chatRequestWithReasoning.tools );
         const toolDefinition = buildCodeInterpreterToolDefinition();
         const toolChoice = normalizeToolChoice( body.tool_choice );
-        const rateLimit = this.getEffectiveRateLimit( config );
+        const rateLimit = this.getEffectiveRateLimit( config, selectedModel );
         const upstreamEndpoint = 'chat/completions';
         const sessionId = this.resolveCodeInterpreterSessionId( body );
 
@@ -2363,7 +2422,7 @@ export class OpenAIProxy {
         return headers;
     }
 
-    private getCandidateModelsForProvider( config: OpenAIModelConfig, requestedModel: string ): string[] {
+    private getCandidateModelsForProvider( config: OpenAIModelConfig, requestedModel: string, includeSiblings = false ): string[] {
         const explicitlyAuto = this.isAutoModel( requestedModel );
         const modelInThisProvider = config.models.some( m => {
             const candidate = typeof m === 'string' ? m : ( m as any ).model;
@@ -2372,26 +2431,33 @@ export class OpenAIProxy {
         // Unlisted models treated as auto-edge: pick best model from provider.
         const isAutoModel = explicitlyAuto || !modelInThisProvider;
 
-        const filterHealthyText = ( models: string[] ): string[] => {
-            return models;
-        };
-
-        if ( config.randomRouting === false && !isAutoModel ) {
-            return filterHealthyText( [requestedModel] );
-        }
-
         const modelNames = config.models.map( m => ( typeof m === 'string' ? m : ( m as any ).model ) );
-        if ( !isAutoModel ) {
-            return filterHealthyText( [requestedModel] );
-        }
-        const uniqueModels = filterHealthyText( Array.from( new Set( modelNames ) ) );
-        if ( !uniqueModels.length ) {
-            return [];
+        const uniqueModels = Array.from( new Set( modelNames ) );
+        const sortedByScore = ( models: string[] ): string[] =>
+            [...models].sort( ( left, right ) =>
+                this.scoreModelForProvider( config, right ) - this.scoreModelForProvider( config, left )
+            );
+
+        if ( isAutoModel ) {
+            return sortedByScore( uniqueModels );
         }
 
-        return uniqueModels.sort( ( left, right ) =>
-            this.scoreModelForProvider( config, right ) - this.scoreModelForProvider( config, left )
-        );
+        // Explicit model request. Providers that do NOT participate in random
+        // routing only ever serve the exact requested model.
+        if ( config.randomRouting === false ) {
+            return [requestedModel];
+        }
+
+        // Sibling pass (last resort): when the requested model is exhausted
+        // across the whole group, participating providers offer their other
+        // models as substitution — this is the return benefit for taking part
+        // in random routing. Cap per provider to bound worst-case fan-out.
+        if ( includeSiblings ) {
+            return sortedByScore( uniqueModels.filter( m => m !== requestedModel ) )
+                .slice( 0, OpenAIProxy.MAX_SIBLING_MODELS_PER_PROVIDER );
+        }
+
+        return [requestedModel];
     }
 
     private scoreModelForProvider( config: OpenAIModelConfig, modelName: string ): number {
@@ -3185,11 +3251,39 @@ export class OpenAIProxy {
         const backends = this.getOptimizedBackends( modelName, endpoint, matchingBackends );
         console.error( `[ws:${endpoint}] Attempting backends for model ${modelName}: ${backends.map( b => b.id ).join( ', ' )}` );
 
+        // Two-pass attempt plan (see proxyRequest): exact model first, then
+        // sibling models from random-routing participants in the same group.
+        const attempts: { config: OpenAIModelConfig; selectedModel: string }[] = [];
         for ( const config of backends ) {
             const candidateModels = this.getCandidateModelsForProvider( config, modelName );
-
             for ( const selectedModel of candidateModels ) {
-                const cooldownRemainingMs = backendCooldownManager.getRemainingMs( config.id, selectedModel );
+                attempts.push( { config, selectedModel } );
+            }
+        }
+        const isAutoEdgeRequest = this.isAutoModel( modelName )
+            || !( CONFIG.models.openai ?? [] ).some( c => this.configHasModel( c, modelName ) );
+        let attemptIdx = 0;
+        let siblingPassAppended = false;
+
+        while ( true ) {
+            if ( attemptIdx >= attempts.length ) {
+                if ( !siblingPassAppended && !isAutoEdgeRequest ) {
+                    siblingPassAppended = true;
+                    console.error( `[ws:${endpoint}] In-group backends exhausted for ${modelName} — sibling pass (random-routing participants)` );
+                    for ( const config of backends ) {
+                        const siblings = this.getCandidateModelsForProvider( config, modelName, true );
+                        for ( const siblingModel of siblings ) {
+                            attempts.push( { config, selectedModel: siblingModel } );
+                        }
+                    }
+                } else {
+                    break;
+                }
+            }
+            if ( attemptIdx >= attempts.length ) break;
+            const { config, selectedModel } = attempts[attemptIdx]!;
+            attemptIdx++;
+            const cooldownRemainingMs = backendCooldownManager.getRemainingMs( config.id, selectedModel );
                 if ( cooldownRemainingMs > 0 ) {
                     continue;
                 }
@@ -3204,7 +3298,15 @@ export class OpenAIProxy {
                     : upstreamBodyRaw;
 
                 const tokens = this.calculateTokenCount( upstreamBody );
-                const rateLimit = this.getEffectiveRateLimit( config );
+                const rateLimit = this.getEffectiveRateLimit( config, selectedModel );
+                // ── Preemptive TPM-meter hop (see proxyRequest) ──
+                if ( this.isGeminiProvider( config ) && rateLimit ) {
+                    const meterRemaining = await rateLimitManager.peekRemaining( config.id, rateLimit, selectedModel );
+                    if ( meterRemaining !== null && meterRemaining < tokens ) {
+                        console.error( `[ws:${endpoint}] TPM meter low provider=${config.id} model=${selectedModel} remaining=${meterRemaining} need=${tokens} — preemptive hop` );
+                        continue;
+                    }
+                }
                 const rateCheck = await rateLimitManager.checkAndConsume( config.id, tokens, rateLimit, selectedModel );
                 if ( !rateCheck.allowed ) {
                     continue;
@@ -3222,7 +3324,7 @@ export class OpenAIProxy {
                     if ( upstreamResponse.status === 429 ) {
                         this.providerStats.recordFailure( config.id, selectedModel );
                         console.warn( `[ws:${endpoint}] 429 from ${config.id}, trying next backend` );
-                        break;
+                        continue;
                     }
 
                     if ( this.isRedirectStatus( upstreamResponse.status ) ) {
@@ -3241,7 +3343,7 @@ export class OpenAIProxy {
                     if ( !upstreamResponse.ok ) {
                         this.providerStats.recordFailure( config.id, selectedModel );
                         console.error( `[ws:${endpoint}] ${upstreamResponse.status} from ${config.id} — trying next backend` );
-                        break;
+                        continue;
                     }
 
                     this.providerStats.recordSuccess( config.id, selectedModel );
@@ -3254,10 +3356,9 @@ export class OpenAIProxy {
                 } catch ( error: any ) {
                     this.providerStats.recordFailure( config.id, selectedModel );
                     console.error( `[ws:${endpoint}] Exception from ${config?.id}: ${error?.message || String( error )}` );
-                    break;
+                    continue;
                 }
             }
-        }
 
         console.error( `[ws:${endpoint}] ALL PROVIDERS FAILED for model ${modelName}` );
         return {

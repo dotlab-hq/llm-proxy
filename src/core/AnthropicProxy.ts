@@ -24,6 +24,7 @@ type ReasoningEffort = NonNullable<OpenAIModelConfig['default_reasoning']>;
 type Modality = OpenAIModelConfig['modalities']['input'][number];
 const AUTO_MODEL_ID = 'auto';
 const DEFAULT_MODALITIES: readonly Modality[] = ['text', 'image', 'audio', 'file'];
+const MAX_SIBLING_MODELS_PER_PROVIDER = 4;  // Cap sibling-model substitution per provider in the last-resort pass
 
 export class AnthropicProxy {
   private app: Hono;
@@ -174,18 +175,55 @@ export class AnthropicProxy {
     const backendIds = backends.map( b => b.id ).join( ', ' );
     console.error( `[${endpoint}] Attempting OpenAI backends for model ${requestedModel}: ${backendIds}` );
 
+    // Two-pass attempt plan (see OpenAIProxy.proxyRequest): the exact requested
+    // model first, then sibling models from random-routing participants in the
+    // same group as the last-resort pass.
+    const attempts: { config: OpenAIModelConfig; selectedModel: string }[] = [];
     for ( const config of backends ) {
       const candidateModels = this.getCandidateModelsForProvider( config, requestedModel, requiredModalities );
-
       for ( const selectedModel of candidateModels ) {
-        const cooldownRemainingMs = backendCooldownManager.getRemainingMs( config.id, selectedModel );
+        attempts.push( { config, selectedModel } );
+      }
+    }
+    const isAutoEdgeRequest = this.isAutoModel( requestedModel )
+      || !( CONFIG.models.openai ?? [] ).some( c => this.configHasModel( c, requestedModel ) );
+    let attemptIdx = 0;
+    let siblingPassAppended = false;
+
+    while ( true ) {
+      if ( attemptIdx >= attempts.length ) {
+        if ( !siblingPassAppended && !isAutoEdgeRequest ) {
+          siblingPassAppended = true;
+          console.error( `[${endpoint}] In-group backends exhausted for ${requestedModel} — sibling pass (random-routing participants)` );
+          for ( const config of backends ) {
+            const siblings = this.getCandidateModelsForProvider( config, requestedModel, requiredModalities, true );
+            for ( const siblingModel of siblings ) {
+              attempts.push( { config, selectedModel: siblingModel } );
+            }
+          }
+        } else {
+          break;
+        }
+      }
+      if ( attemptIdx >= attempts.length ) break;
+      const { config, selectedModel } = attempts[attemptIdx]!;
+      attemptIdx++;
+      const cooldownRemainingMs = backendCooldownManager.getRemainingMs( config.id, selectedModel );
         if ( cooldownRemainingMs > 0 ) {
           console.warn( `[${endpoint}] cooldown_active provider=${config.id} model=${selectedModel} remainingMs=${cooldownRemainingMs}` );
           continue;
         }
 
         const tokens = this.calculateTokenCount( body );
-        const rateLimit = this.getEffectiveRateLimit( config );
+        const rateLimit = this.getEffectiveRateLimit( config, selectedModel );
+        // ── Preemptive TPM-meter hop (see OpenAIProxy.proxyRequest) ──
+        if ( this.isGeminiProvider( config ) && rateLimit ) {
+          const meterRemaining = await rateLimitManager.peekRemaining( config.id, rateLimit, selectedModel );
+          if ( meterRemaining !== null && meterRemaining < tokens ) {
+            console.error( `[${endpoint}] TPM meter low provider=${config.id} model=${selectedModel} remaining=${meterRemaining} need=${tokens} — preemptive hop` );
+            continue;
+          }
+        }
         const rateCheck = await rateLimitManager.checkAndConsume(
           config.id,
           tokens,
@@ -351,7 +389,6 @@ export class AnthropicProxy {
           console.error( `[${endpoint}] Exception from ${config?.id ?? config?.name}: ${error?.message || String( error )}` );
           continue;
         }
-      }
     }
 
     if ( lastFailure ) {
@@ -622,7 +659,7 @@ export class AnthropicProxy {
     return exactScore * 100 + successScore + latencyScore + healthScore / 2 + freshnessBonus - failurePenalty;
   }
 
-  private getCandidateModelsForProvider( config: OpenAIModelConfig, requestedModel: string, requiredModalities: readonly Modality[] = ['text'] ): string[] {
+  private getCandidateModelsForProvider( config: OpenAIModelConfig, requestedModel: string, requiredModalities: readonly Modality[] = ['text'], includeSiblings = false ): string[] {
     // Provider-level health gate: skip entire provider if it is unhealthy
     if ( backendCooldownManager.getProviderHealthScore( config.id ) < 50 ) {
       return [];
@@ -650,10 +687,27 @@ export class AnthropicProxy {
     const modelNames = config.models
       .filter( model => this.modelEntrySupportsModalities( config, model, requiredModalities ) )
       .map( m => ( typeof m === 'string' ? m : ( m as any ).model ) );
+    const uniqueModels: string[] = Array.from( new Set( modelNames ) );
+
     if ( !isAutoModel ) {
+      // Sibling pass (last resort): when the requested model is exhausted
+      // across the whole group, participating (randomRouting !== false)
+      // providers offer their other models — the return benefit of taking
+      // part in random routing.
+      if ( includeSiblings && config.randomRouting !== false ) {
+        const siblingModels = uniqueModels.filter( m => m !== requestedModel );
+        if ( !siblingModels.length ) return [];
+        const healthySiblings = siblingModels.filter( model => {
+          if ( backendCooldownManager.isOnCooldown( config.id, model ) ) return false;
+          const stats = this.providerStats.getStats( config.id, model );
+          return !( stats && stats.consecutiveFailures >= 5 );
+        } );
+        const pool = healthySiblings.length > 0 ? healthySiblings : siblingModels;
+        const startIndex = Math.floor( Math.random() * pool.length );
+        return [...pool.slice( startIndex ), ...pool.slice( 0, startIndex )].slice( 0, MAX_SIBLING_MODELS_PER_PROVIDER );
+      }
       return [requestedModel];
     }
-    const uniqueModels: string[] = Array.from( new Set( modelNames ) );
     if ( !uniqueModels.length ) {
       return [requestedModel];
     }
@@ -807,7 +861,17 @@ export class AnthropicProxy {
     return rest;
   }
 
-  private getEffectiveRateLimit( config: OpenAIModelConfig ): Config['rateLimit'] | undefined {
+  private getEffectiveRateLimit( config: OpenAIModelConfig, selectedModel?: string ): Config['rateLimit'] | undefined {
+    // Per-model rate limit (models array entries can carry their own
+    // rateLimit — the gemini providers use this) takes precedence.
+    if ( selectedModel ) {
+      const entry = config.models.find( m =>
+        typeof m !== 'string' && ( m as any ).model === selectedModel && ( m as any ).rateLimit
+      );
+      if ( entry && typeof entry !== 'string' ) {
+        return ( entry as any ).rateLimit;
+      }
+    }
     if ( config.individualLimit && config.rateLimit ) {
       return config.rateLimit;
     }

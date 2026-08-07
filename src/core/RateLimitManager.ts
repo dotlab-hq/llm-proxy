@@ -10,6 +10,7 @@ import {
     LOCK_TIMEOUT_MS,
     ONE_DAY_MS,
     ONE_HOUR_MS,
+    peekRemaining,
     resetBucket,
     resetDayCounters,
     resetHourCounters,
@@ -213,6 +214,17 @@ export class RateLimitManager {
     async getUsage( providerId: string, modelName?: string ): Promise<{ tokensRemaining: number; dailyRequests: number; audioSecondsThisHour: number; audioSecondsToday: number; tokensToday: number } | null> {
         const key = modelName ? `${this.keyPrefix}${providerId}:${modelName}` : `${this.keyPrefix}${providerId}`;
         return getBucketUsage( key );
+    }
+
+    /**
+     * Refill-aware meter peek (no consumption). Used for preemptive TPM
+     * hopping: returns the estimated tokens available right now for this
+     * (provider, model) bucket, or null when nothing is configured/consumed
+     * yet (treat as unlimited).
+     */
+    async peekRemaining( providerId: string, rateLimit: RateLimit | undefined, modelName?: string ): Promise<number | null> {
+        const key = modelName ? `${this.keyPrefix}${providerId}:${modelName}` : `${this.keyPrefix}${providerId}`;
+        return peekRemaining( key, rateLimit );
     }
 
     async reset( providerId: string, modelName?: string ): Promise<void> {

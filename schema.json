@@ -709,7 +709,7 @@
               },
               "randomRouting": {
                 "default": true,
-                "description": "If false, disables this provider as a fallback for unknown models or exhausted exact-model providers",
+                "description": "If true (default), this provider participates in random routing: it can serve requests for models outside its own list, and in return it offers its other (sibling) models as a last resort when the requested model is exhausted across its group. If false, it only ever serves its own listed models",
                 "type": "boolean"
               },
               "groupSpace": {
@@ -1050,7 +1050,7 @@
               },
               "randomRouting": {
                 "default": true,
-                "description": "If false, disables this provider as a fallback for unknown models or exhausted exact-model providers",
+                "description": "If true (default), this provider participates in random routing: it can serve requests for models outside its own list, and in return it offers its other (sibling) models as a last resort when the requested model is exhausted across its group. If false, it only ever serves its own listed models",
                 "type": "boolean"
               },
               "groupSpace": {
