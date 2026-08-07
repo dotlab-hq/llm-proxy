@@ -666,9 +666,10 @@ export class AnthropicProxy {
     }
 
     const explicitlyAuto = this.isAutoModel( requestedModel );
+    const requestedNormalized = stripFreeModifier( requestedModel ).normalizedId;
     const modelInThisProvider = config.models.some( m => {
       const candidate = typeof m === 'string' ? m : ( m as any ).model;
-      return stripFreeModifier( candidate ).normalizedId === stripFreeModifier( requestedModel ).normalizedId;
+      return stripFreeModifier( candidate ).normalizedId === requestedNormalized;
     } );
     // Unlisted models treated as auto-edge: pick best model from provider.
     const isAutoModel = explicitlyAuto || !modelInThisProvider;
@@ -684,17 +685,16 @@ export class AnthropicProxy {
       // Fall through to try other models if requested model is unhealthy
     }
 
-    const modelNames = config.models
-      .filter( model => this.modelEntrySupportsModalities( config, model, requiredModalities ) )
-      .map( m => ( typeof m === 'string' ? m : ( m as any ).model ) );
-    const uniqueModels: string[] = Array.from( new Set( modelNames ) );
-
     if ( !isAutoModel ) {
       // Sibling pass (last resort): when the requested model is exhausted
       // across the whole group, participating (randomRouting !== false)
       // providers offer their other models — the return benefit of taking
       // part in random routing.
       if ( includeSiblings && config.randomRouting !== false ) {
+        const modelNames = config.models
+          .filter( model => this.modelEntrySupportsModalities( config, model, requiredModalities ) )
+          .map( m => ( typeof m === 'string' ? m : ( m as any ).model ) );
+        const uniqueModels: string[] = Array.from( new Set( modelNames ) );
         const siblingModels = uniqueModels.filter( m => m !== requestedModel );
         if ( !siblingModels.length ) return [];
         const healthySiblings = siblingModels.filter( model => {
@@ -708,6 +708,12 @@ export class AnthropicProxy {
       }
       return [requestedModel];
     }
+
+    const modelNames = config.models
+      .filter( model => this.modelEntrySupportsModalities( config, model, requiredModalities ) )
+      .map( m => ( typeof m === 'string' ? m : ( m as any ).model ) );
+    const uniqueModels: string[] = Array.from( new Set( modelNames ) );
+
     if ( !uniqueModels.length ) {
       return [requestedModel];
     }

@@ -2424,22 +2424,20 @@ export class OpenAIProxy {
 
     private getCandidateModelsForProvider( config: OpenAIModelConfig, requestedModel: string, includeSiblings = false ): string[] {
         const explicitlyAuto = this.isAutoModel( requestedModel );
+        const requestedNormalized = stripFreeModifier( requestedModel ).normalizedId;
         const modelInThisProvider = config.models.some( m => {
             const candidate = typeof m === 'string' ? m : ( m as any ).model;
-            return stripFreeModifier( candidate ).normalizedId === stripFreeModifier( requestedModel ).normalizedId;
+            return stripFreeModifier( candidate ).normalizedId === requestedNormalized;
         } );
         // Unlisted models treated as auto-edge: pick best model from provider.
         const isAutoModel = explicitlyAuto || !modelInThisProvider;
 
-        const modelNames = config.models.map( m => ( typeof m === 'string' ? m : ( m as any ).model ) );
-        const uniqueModels = Array.from( new Set( modelNames ) );
-        const sortedByScore = ( models: string[] ): string[] =>
-            [...models].sort( ( left, right ) =>
+        if ( isAutoModel ) {
+            const modelNames = config.models.map( m => ( typeof m === 'string' ? m : ( m as any ).model ) );
+            const uniqueModels = Array.from( new Set( modelNames ) );
+            return [...uniqueModels].sort( ( left, right ) =>
                 this.scoreModelForProvider( config, right ) - this.scoreModelForProvider( config, left )
             );
-
-        if ( isAutoModel ) {
-            return sortedByScore( uniqueModels );
         }
 
         // Explicit model request. Providers that do NOT participate in random
@@ -2453,8 +2451,11 @@ export class OpenAIProxy {
         // models as substitution — this is the return benefit for taking part
         // in random routing. Cap per provider to bound worst-case fan-out.
         if ( includeSiblings ) {
-            return sortedByScore( uniqueModels.filter( m => m !== requestedModel ) )
-                .slice( 0, OpenAIProxy.MAX_SIBLING_MODELS_PER_PROVIDER );
+            const modelNames = config.models.map( m => ( typeof m === 'string' ? m : ( m as any ).model ) );
+            const uniqueModels = Array.from( new Set( modelNames ) );
+            return [...uniqueModels.filter( m => m !== requestedModel )].sort( ( left, right ) =>
+                this.scoreModelForProvider( config, right ) - this.scoreModelForProvider( config, left )
+            ).slice( 0, OpenAIProxy.MAX_SIBLING_MODELS_PER_PROVIDER );
         }
 
         return [requestedModel];
