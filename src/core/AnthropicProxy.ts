@@ -469,7 +469,17 @@ export class AnthropicProxy {
 
     const result = isAutoModel
       ? fallbackBackends
-      : modelIsListed ? [...exactBackends, ...fallbackBackends] : fallbackBackends;
+      : modelIsListed
+        ? [
+            ...exactBackends,
+            // Fallback stays group-scoped: only fall back to providers in the
+            // same groupSpace as an exact-match provider.
+            ...fallbackBackends.filter( ( fb ) => {
+              const fbGroup = ( fb as any ).groupSpace || 'default';
+              return exactBackends.some( ( eb ) => ( ( eb as any ).groupSpace || 'default' ) === fbGroup );
+            } ),
+          ]
+        : fallbackBackends;
     this.backendRouteCache.set( cacheKey, result );
     return result;
   }
@@ -580,7 +590,13 @@ export class AnthropicProxy {
 
   private getOptimizedBackends( modelName: string, backends: OpenAIModelConfig[], requiredModalities: readonly Modality[] ): OpenAIModelConfig[] {
     const candidates = this.getRoundRobinBackends( this.buildRouteCacheKey( modelName, requiredModalities ), backends );
-    return candidates.sort( ( left, right ) => this.scoreProvider( right, modelName, requiredModalities ) - this.scoreProvider( left, modelName, requiredModalities ) );
+    const sorted = candidates.sort( ( left, right ) => this.scoreProvider( right, modelName, requiredModalities ) - this.scoreProvider( left, modelName, requiredModalities ) );
+
+    // Group isolation: fallback must stay within the primary backend's groupSpace.
+    const primaryBackend = sorted[0];
+    return primaryBackend
+      ? sorted.filter( ( b ) => ( ( b as any ).groupSpace || 'default' ) === ( ( primaryBackend as any ).groupSpace || 'default' ) )
+      : sorted;
   }
 
   private scoreProvider( config: OpenAIModelConfig, requestedModel: string, requiredModalities: readonly Modality[] ): number {

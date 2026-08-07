@@ -109,7 +109,17 @@ export class AnthropicProxy {
       else if ( isAuto || config.randomRouting !== false ) fallback.push( config );
     }
 
-    const result = isAuto ? fallback : modelIsListed ? [...exact, ...fallback] : fallback;
+    const result = isAuto ? fallback : modelIsListed
+      ? [
+          ...exact,
+          // Fallback stays group-scoped: only fall back to providers in the
+          // same groupSpace as an exact-match provider.
+          ...fallback.filter( ( fb ) => {
+            const fbGroup = ( fb as any ).groupSpace || 'default';
+            return exact.some( ( eb ) => ( ( eb as any ).groupSpace || 'default' ) === fbGroup );
+          } ),
+        ]
+      : fallback;
     this.backendRouteCache.set( cacheKey, result );
     return result;
   }

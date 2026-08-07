@@ -2129,12 +2129,24 @@ export class OpenAIProxy {
 
         const result = isAutoModel
             ? fallbackBackends
-            : modelIsListed ? [...exactBackends, ...fallbackBackends] : fallbackBackends;
+            : modelIsListed
+                ? [
+                    ...exactBackends,
+                    // Fallback stays group-scoped: only fall back to providers in
+                    // the same groupSpace as an exact-match provider. Otherwise a
+                    // gemini-group request would leak into the default group (and
+                    // vice versa) when the primary backend fails.
+                    ...fallbackBackends.filter( fb => {
+                        const fbGroup = ( fb as any ).groupSpace || 'default';
+                        return exactBackends.some( eb => ( ( eb as any ).groupSpace || 'default' ) === fbGroup );
+                    } )
+                  ]
+                : fallbackBackends;
 
-        // Deduplicate by baseUrl so multiple API keys against the same
-        // physical upstream aren't all retried in a single request. Without
-        // this, configs that share a baseUrl (e.g. several Zen keys) cause
-        // severe delays as the proxy iterates through identical endpoints.
+        // Deduplicate by baseUrl+apiKey so multiple API keys for the same
+        // provider survive as separate backends (allowing in-group fallback
+        // across keys) while identical endpoints+keys aren't retried in a
+        // single request.
         const deduped = this.dedupeBackendsByBaseUrl( result ).slice( 0, OpenAIProxy.MAX_FALLBACK_BACKENDS );
 
         if ( this.backendRouteCache.size > OpenAIProxy.MAX_CACHE_SIZE ) {
@@ -2151,11 +2163,19 @@ export class OpenAIProxy {
         if ( backends.length <= 1 ) return backends;
         const seen = new Map<string, OpenAIModelConfig>();
         for ( const config of backends ) {
-            const key = ( config.baseUrl ?? '' ).replace( /\/+$/, '' ).toLowerCase();
-            const lookupKey = key || `id:${config.id}`;
-            if ( !seen.has( lookupKey ) ) {
-                seen.set( lookupKey, config );
+            // Composite key: baseUrl + apiKey prefix. Keeps different API keys
+            // for the same upstream as separate backends (so e.g. gemini-1..6
+            // stay distinct for in-group fallback) while collapsing exact
+            // duplicates.
+            const baseUrl = ( config.baseUrl ?? '' ).replace( /\/+$/, '' ).toLowerCase();
+            const apiKey = ( config.apiKey ?? '' ).substring( 0, 12 );
+            const key = `${baseUrl}::${apiKey}`;
+            if ( !key || key === '::' ) {
+                const fallbackKey = `id:${config.id}`;
+                if ( !seen.has( fallbackKey ) ) seen.set( fallbackKey, config );
+                continue;
             }
+            if ( !seen.has( key ) ) seen.set( key, config );
         }
         return Array.from( seen.values() );
     }
@@ -2251,7 +2271,11 @@ export class OpenAIProxy {
             return backends;
         }
 
-        const cacheKey = `${endpoint ?? 'default'}:${modelName}`;
+        // The eligible backend list is group-scoped and can differ for the same
+        // model depending on the request's routing group. Include it in the key
+        // so a previously cached mixed-group result can never leak into fallback.
+        const eligibleBackendKey = backends.map( backend => backend.id ).sort().join( ',' );
+        const cacheKey = `${endpoint ?? 'default'}:${modelName}:${eligibleBackendKey}`;
         const cached = this.optimizedBackendCache.get( cacheKey );
         if ( cached && cached.expiresAt > Date.now() ) {
             return cached.backends;
@@ -2262,8 +2286,16 @@ export class OpenAIProxy {
             this.scoreProvider( right, modelName ) - this.scoreProvider( left, modelName )
         );
 
+        // Group isolation: fallback must stay within the primary backend's
+        // groupSpace. Without this, a failed gemini-group backend falls back
+        // into the default group (and vice versa), breaking group isolation.
+        const primaryBackend = sorted[0];
+        const groupIsolatedSorted = primaryBackend
+            ? sorted.filter( b => ( ( b as any ).groupSpace || 'default' ) === ( ( primaryBackend as any ).groupSpace || 'default' ) )
+            : sorted;
+
         this.optimizedBackendCache.set( cacheKey, {
-            backends: sorted,
+            backends: groupIsolatedSorted,
             expiresAt: Date.now() + OpenAIProxy.BACKEND_CACHE_TTL_MS,
         } );
 
@@ -2274,7 +2306,7 @@ export class OpenAIProxy {
             }
         }
 
-        return sorted;
+        return groupIsolatedSorted;
     }
 
     private scoreProvider( config: OpenAIModelConfig, requestedModel: string ): number {

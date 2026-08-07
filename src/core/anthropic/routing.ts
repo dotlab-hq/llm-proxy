@@ -44,5 +44,11 @@ export function getCandidateModelsForProvider( config: OpenAIModelConfig, reques
 
 export function getOptimizedBackends( modelName: string, backends: OpenAIModelConfig[], requiredModalities: readonly Modality[], buildRouteCacheKey: ( m: string, mm: readonly Modality[] ) => string, getRoundRobinBackends: ( m: string, b: OpenAIModelConfig[] ) => OpenAIModelConfig[], providerStats: any ): OpenAIModelConfig[] {
     const candidates = getRoundRobinBackends( buildRouteCacheKey( modelName, requiredModalities ), backends );
-    return candidates.sort( ( left, right ) => scoreProvider( right, modelName, requiredModalities, providerStats ) - scoreProvider( left, modelName, requiredModalities, providerStats ) );
+    const sorted = candidates.sort( ( left, right ) => scoreProvider( right, modelName, requiredModalities, providerStats ) - scoreProvider( left, modelName, requiredModalities, providerStats ) );
+
+    // Group isolation: fallback must stay within the primary backend's groupSpace.
+    const primaryBackend = sorted[0];
+    return primaryBackend
+        ? sorted.filter( b => ( ( b as any ).groupSpace || 'default' ) === ( ( primaryBackend as any ).groupSpace || 'default' ) )
+        : sorted;
 }
