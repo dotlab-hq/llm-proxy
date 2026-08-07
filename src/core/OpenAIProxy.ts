@@ -2453,7 +2453,7 @@ export class OpenAIProxy {
         if ( includeSiblings ) {
             const modelNames = config.models.map( m => ( typeof m === 'string' ? m : ( m as any ).model ) );
             const uniqueModels = Array.from( new Set( modelNames ) );
-            return [...uniqueModels.filter( m => m !== requestedModel )].sort( ( left, right ) =>
+            return uniqueModels.filter( m => m !== requestedModel ).sort( ( left, right ) =>
                 this.scoreModelForProvider( config, right ) - this.scoreModelForProvider( config, left )
             ).slice( 0, OpenAIProxy.MAX_SIBLING_MODELS_PER_PROVIDER );
         }
