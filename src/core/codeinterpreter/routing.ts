@@ -6,13 +6,25 @@ import type {
 
 const AUTO_MODEL_ID = 'auto';
 
-export function getBackendsForModel( config: ProxyBackendConfig & ModelSelectionConfig, modelName: string ): any[] {
+export function getBackendsForModel( config: ProxyBackendConfig & ModelSelectionConfig, modelName: string, targetGroup?: string ): any[] {
     const requestedNormalized = stripFreeModifier( modelName ).normalizedId;
     if ( config.embeddings === true ) {
         return [];
     }
 
-    return requestedNormalized === AUTO_MODEL_ID || config.models.some( m => {
+    const explicitlyAuto = requestedNormalized === AUTO_MODEL_ID;
+    const modelInThisProvider = config.models.some( m => {
+        const candidate = typeof m === 'string' ? m : ( m as any ).model;
+        return stripFreeModifier( candidate ).normalizedId === requestedNormalized;
+    } );
+    const isAutoModel = explicitlyAuto || !modelInThisProvider;
+
+    // Group isolation: only applies to auto-edge (fallback) routing.
+    if ( isAutoModel && targetGroup && ( config as any ).groupSpace !== targetGroup ) {
+        return [];
+    }
+
+    return isAutoModel || config.models.some( m => {
         const candidate = typeof m === 'string' ? m : ( m as any ).model;
         return stripFreeModifier( candidate ).normalizedId === requestedNormalized;
     } ) || config.randomRouting !== false

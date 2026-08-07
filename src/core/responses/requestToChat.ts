@@ -9,7 +9,13 @@ import {
 } from './helpers';
 
 export function convertResponsesRequestToChat( request: ResponsesRequest ): ChatCompletionRequest {
-    const messages = buildMessagesFromResponsesInput( request );
+    const messages = buildMessagesFromResponsesInput( request ).map( ( message ) => {
+        // Zen's deserializer is stricter than OpenAI's schema and rejects
+        // null/object message content. Codex can emit those values for
+        // assistant/tool-call history, so enforce the Chat wire shape here.
+        if ( typeof message.content === 'string' || Array.isArray( message.content ) ) return message;
+        return { ...message, content: '' };
+    } );
     const chatRequest: ChatCompletionRequest = {
         model: request.model,
         messages,
@@ -25,10 +31,6 @@ export function convertResponsesRequestToChat( request: ResponsesRequest ): Chat
     if ( request.presence_penalty != null ) chatRequest.presence_penalty = request.presence_penalty;
     if ( request.frequency_penalty != null ) chatRequest.frequency_penalty = request.frequency_penalty;
     if ( request.seed != null ) chatRequest.seed = request.seed;
-
-    if ( request.stream ) {
-        chatRequest.stream_options = { include_usage: true };
-    }
 
     const tools = convertToolsToChat( request.tools );
     if ( tools.length > 0 ) chatRequest.tools = tools;
@@ -47,9 +49,18 @@ export function convertResponsesRequestToChat( request: ResponsesRequest ): Chat
         'max_output_tokens',
     ] );
 
-    // Carry through any extra fields not explicitly mapped (skip Responses-only fields)
+    // Carry through only fields that are valid Chat Completions options. Codex
+    // sends several Responses-only control fields (store, include, text,
+    // truncation, prompt_cache_key, etc.). Forwarding those to compatible
+    // /chat/completions providers causes a hard 400 before streaming starts.
+    const CHAT_COMPAT_FIELDS = new Set( [
+        'response_format', 'parallel_tool_calls', 'logprobs', 'top_logprobs',
+        'user', 'service_tier', 'modalities', 'audio', 'prediction',
+        'logit_bias', 'n', 'max_tokens', 'tools', 'tool_choice',
+    ] );
+
     for ( const [key, value] of Object.entries( request ) ) {
-        if ( !( key in chatRequest ) && value !== undefined && !RESPONSES_ONLY_FIELDS.has( key ) ) {
+        if ( CHAT_COMPAT_FIELDS.has( key ) && !( key in chatRequest ) && value !== undefined && !RESPONSES_ONLY_FIELDS.has( key ) ) {
             ( chatRequest as Record<string, unknown> )[key] = value;
         }
     }
@@ -72,9 +83,15 @@ function buildMessagesFromResponsesInput( request: ResponsesRequest ): ChatMessa
         for ( const message of legacyMessages ) {
             if ( !message || typeof message !== 'object' ) continue;
             const role = ( message as { role?: unknown } ).role;
+            const normalizedRole = role === 'developer' ? 'system' : role === 'assistant' || role === 'tool' || role === 'system' ? role : 'user';
+            const rawContent = ( message as { content?: unknown } ).content;
             messages.push( {
                 ...( message as ChatMessage ),
-                role: role === 'developer' ? 'system' : role === 'assistant' || role === 'tool' || role === 'system' ? role : 'user',
+                role: normalizedRole,
+                // Some Responses clients send placeholder user messages with
+                // null content while assembling a turn. Chat Completions
+                // providers commonly reject those messages with HTTP 400.
+                ...( normalizedRole === 'user' && rawContent == null ? { content: '' } : {} ),
             } );
         }
         return messages;
@@ -102,7 +119,9 @@ function mapInputItemToMessage( item: Record<string, unknown> ): ChatMessage | C
     if ( type === 'function_call' ) {
         return {
             role: 'assistant',
-            content: null,
+            // Some compatible providers reject null message content even
+            // when the assistant message contains tool_calls.
+            content: '',
             tool_calls: [{
                 id: ( item.call_id as string ) || ( item.id as string ) || generateId( 'call' ),
                 type: 'function',
@@ -139,13 +158,13 @@ function mapInputItemToMessage( item: Record<string, unknown> ): ChatMessage | C
         const toolCalls = extractToolCallsFromAssistantItem( item );
         return {
             role: 'assistant',
-            content: flattenContent( item.content ),
+            content: flattenContent( item.content ) ?? '',
             ...( toolCalls.length > 0 ? { tool_calls: toolCalls } : {} ),
         };
     }
 
     // user or default
-    return { role: 'user', content: flattenContent( item.content ) };
+    return { role: 'user', content: flattenContent( item.content ) ?? '' };
 }
 
 function flattenContent( content: unknown ): string | Array<Record<string, unknown>> | null {

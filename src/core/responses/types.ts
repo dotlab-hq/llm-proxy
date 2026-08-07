@@ -113,6 +113,8 @@ export interface ResponsesStreamState {
     firstEmissionLogged: boolean;
     textItems: Array<{ itemId: string; text: string }>;
     toolCalls: Array<{ id: string; name: string; arguments: string }>;
+    /** Raw DSML tool-call text emitted by models that do not support native tools. */
+    dsmlBuffer: string;
     reasoningItems: Array<{ itemId: string; text: string }>;
     currentReasoningBlockOpen: boolean;
     reasoningBuffer: string;

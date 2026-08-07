@@ -87,8 +87,9 @@ export class AnthropicProxy {
     return { ...payload, usage: { ...usage, server_tool_use: { ...serverToolUse, tool_search_requests: ( serverToolUse.tool_search_requests ?? 0 ) + 1 } } };
   }
 
-  getBackendsForModel( modelName: string, requiredModalities: readonly Modality[] = ['text'] ): OpenAIModelConfig[] {
-    const cacheKey = buildRouteCacheKey( modelName, requiredModalities );
+  getBackendsForModel( modelName: string, requiredModalities: readonly Modality[] = ['text'], targetGroup?: string ): OpenAIModelConfig[] {
+    const effectiveGroup = targetGroup || 'default';
+    const cacheKey = buildRouteCacheKey( modelName, requiredModalities ) + `|${effectiveGroup}`;
     const cached = this.backendRouteCache.get( cacheKey );
     if ( cached ) return cached;
 
@@ -101,6 +102,9 @@ export class AnthropicProxy {
     for ( const config of configs ) {
       // Never route Anthropic text/messages through image/STT/TTS/embeddings providers
       if ( isSttOrTtsOnlyConfig( config ) || isEmbeddingsEnabled( config ) || isImageOnlyConfig( config ) || !providerSupportsModalities( config, requiredModalities ) ) continue;
+      // Group isolation: only applies to auto-edge (fallback) routing.
+      // Explicit model requests always gather all providers regardless of group.
+      if ( isAuto && ( config as any ).groupSpace !== effectiveGroup ) continue;
       if ( configHasModel( config, modelName ) ) exact.push( config );
       else if ( isAuto || config.randomRouting !== false ) fallback.push( config );
     }

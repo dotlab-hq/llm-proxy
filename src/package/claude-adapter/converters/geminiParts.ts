@@ -62,8 +62,10 @@ export function reconstructGeminiPartsFromMessage( content: any[] ): GeminiPart[
     // Check if thinking block has Gemini provider state (native parts from Gemini response)
     for ( const block of content ) {
         if ( block.type === 'thinking' && block._provider_state?.google?.parts ) {
-            // Use the exact native Gemini parts, but validate thought_signatures are present
-            return ensureThoughtSignaturesInParts( block._provider_state.google.parts );
+            // Native Gemini parts are opaque provider state. Replay them verbatim:
+            // thought blocks and thought_signature values are signed by Gemini and
+            // must not be removed, rewritten, or supplemented before the next call.
+            return block._provider_state.google.parts as GeminiPart[];
         }
     }
 

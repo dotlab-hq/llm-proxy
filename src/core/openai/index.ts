@@ -70,6 +70,7 @@ export class OpenAIProxy {
         responseId: string;
         model: string;
         stream?: boolean;
+        targetGroup?: string;
     } ): Promise<{ status: number; payload?: any; response?: Response; providerId?: string; selectedModel?: string }> {
         return processUpstreamWithFallback( this.state(), body, endpoint, options );
     }

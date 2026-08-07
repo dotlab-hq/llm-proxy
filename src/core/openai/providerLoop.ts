@@ -5,11 +5,17 @@ import { HedgedDispatcher, HedgedDispatchExhaustedError } from '../HedgedDispatc
 import { isDebugEnabled, redactForLog } from '@/utils/debug';
 import { formatTimingEntries } from '@/utils/timing';
 import { CONFIG } from '@/utils/schema.lookup';
-import { isStringContentOnlyProvider, normalizeMessagesContentToString } from '../routing/shared';
+import {
+    isStringContentOnlyProvider,
+    normalizeMessagesContentToString,
+    getGroupSpace,
+    DEFAULT_GROUP_SPACE,
+} from '../routing/shared';
 import {
     getBackendsForModel,
     getOptimizedBackends,
     getCandidateModelsForProvider,
+    getRequiredInputModalities,
     isGeminiProvider,
 } from './routing';
 import {
@@ -23,6 +29,8 @@ import {
     parseResponsePayload,
     getEffectiveRateLimit,
     fetchWithProxy,
+    stripGeminiOption,
+    ensureToolCallReasoningContent,
 } from './helpers';
 import { withGeminiThinking, withReasoningEffort } from './reasoning';
 import type { BackendState, OpenAIModelConfig } from './types';
@@ -85,13 +93,6 @@ type UpstreamAttemptResult = {
     upstreamResponseReceivedAt: number;
 };
 
-function stripGeminiOption( body: any ): any {
-    if ( body?.extra?.gemini !== true ) return body;
-    const { extra, ...rest } = body;
-    const { gemini, ...remainingExtra } = extra;
-    return Object.keys( remainingExtra ).length ? { ...rest, extra: remainingExtra } : rest;
-}
-
 export async function runProxyRequest( args: ProxyRequestArgs ): Promise<ProxyRequestResult> {
     const { c, state, endpoint } = args;
     const redirectDepth = args.redirectDepth ?? 1;
@@ -122,20 +123,29 @@ export async function runProxyRequest( args: ProxyRequestArgs ): Promise<ProxyRe
     const originalStreamFlag = args.originalResponsesBody?.stream === true || body.stream === true;
     const isStreamingResponses = isResponsesApi && originalStreamFlag;
 
-    const matchingBackends = getBackendsForModel( state, modelName, endpoint );
+    // Only text-chat endpoints carry message content that must be gated by
+    // provider modalities (embeddings/STT/TTS/images endpoints are already
+    // filtered by endpoint-specific flags).
+    const requiredModalities = getRequiredInputModalities( body );
+    const targetGroup = c.req.header( 'x-group-space' ) || DEFAULT_GROUP_SPACE;
+
+    const matchingBackends = getBackendsForModel( state, modelName, endpoint, requiredModalities, targetGroup );
     if ( !matchingBackends.length ) {
         console.error( `[${endpoint}] No backends found for model: ${modelName}` );
         if ( isStreamingResponses ) return { response: sendResponsesStreamError( modelName, `Model not found: ${modelName}` ) };
         return { response: c.json( { error: { message: `Model not found: ${modelName}`, type: 'invalid_request_error' } }, 400 ) };
     }
 
-    const backends = getOptimizedBackends( state, modelName, endpoint, matchingBackends );
-    console.error( `[${endpoint}] Attempting backends for model ${modelName}: ${backends.map( b => b.id ).join( ', ' )}` );
+    const backends = getOptimizedBackends( state, modelName, endpoint, matchingBackends, requiredModalities );
+    if ( isDebugEnabled() ) console.info( `[${endpoint}] Attempting backends for model ${modelName}: ${backends.map( b => b.id ).join( ', ' )}` );
 
     // ─── Build flat candidate list (config + model pairs) for hedged dispatch ───
     const allCandidates: ProviderCandidate[] = [];
+    // url/headers depend only on (config, endpoint) — reuse across the config's
+    // candidate models instead of rebuilding per candidate.
+    const requestPlanCache = new Map<string, { url: string; headers: Record<string, string> }>();
     for ( const config of backends ) {
-        const candidateModels = getCandidateModelsForProvider( state, config, modelName );
+        const candidateModels = getCandidateModelsForProvider( state, config, modelName, requiredModalities );
         for ( const selectedModel of candidateModels ) {
             const cooldownRemainingMs = backendCooldownManager.getRemainingMs( config.id, selectedModel );
             if ( cooldownRemainingMs > 0 ) {
@@ -144,7 +154,8 @@ export async function runProxyRequest( args: ProxyRequestArgs ): Promise<ProxyRe
             }
             const requestWithModel = { ...body, model: selectedModel };
             const withReasoning = withReasoningEffort( requestWithModel, config, selectedModel );
-            const upstreamBodyRaw = isGeminiProvider( config ) ? ensureToolCallThoughtSignatures( withGeminiThinking( withReasoning, selectedModel ) ) : stripGeminiOption( withReasoning );
+            const reasoningCompatible = ensureToolCallReasoningContent( withReasoning );
+            const upstreamBodyRaw = isGeminiProvider( config ) ? ensureToolCallThoughtSignatures( withGeminiThinking( reasoningCompatible, selectedModel ) ) : stripGeminiOption( reasoningCompatible );
             const upstreamBody = isStringContentOnlyProvider( config )
                 ? normalizeMessagesContentToString( upstreamBodyRaw )
                 : upstreamBodyRaw;
@@ -159,12 +170,18 @@ export async function runProxyRequest( args: ProxyRequestArgs ): Promise<ProxyRe
                 continue;
             }
 
+            let requestPlan = requestPlanCache.get( config.id );
+            if ( !requestPlan ) {
+                requestPlan = { url: buildApiUrl( config, endpoint ), headers: buildHeaders( config ) };
+                requestPlanCache.set( config.id, requestPlan );
+            }
+
             allCandidates.push( {
                 config,
                 selectedModel,
                 upstreamBody,
-                url: buildApiUrl( config, endpoint ),
-                headers: buildHeaders( config ),
+                url: requestPlan.url,
+                headers: requestPlan.headers,
             } );
         }
     }

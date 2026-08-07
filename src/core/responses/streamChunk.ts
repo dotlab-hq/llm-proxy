@@ -22,6 +22,7 @@ export function processChatStreamChunkForResponses(
     // Handle [DONE] sentinel
     if ( chunk === null ) {
         flushReasoningBuffer( state, out );
+        parseDsmlToolCalls( state );
         finishResponsesStream( state, out );
         return true;
     }
@@ -94,10 +95,19 @@ export function processChatStreamChunkForResponses(
         const content = delta.content as string | undefined;
 
         if ( typeof content === 'string' && content.length > 0 ) {
+            // Some reasoning models ignore the tool schema and print their
+            // internal DeepSeek/DSML tool protocol as assistant text. Keep it
+            // out of the client response and turn it back into a real tool
+            // call once the invocation is complete.
+            const visibleContent = consumeDsmlContent( content, state );
+            const contentToEmit = visibleContent;
+            if ( contentToEmit.length === 0 ) {
+                // Continue to native tool-call processing below.
+            } else {
             if ( !state.currentTextBlockOpen ) {
                 closeReasoningBlock( state, out );
                 const itemId = generateId( 'msg' );
-                state.textItems.push( { itemId, text: content } );
+                state.textItems.push( { itemId, text: contentToEmit } );
                 emitResponsesEvent( out, 'response.output_item.added', {
                     type: 'response.output_item.added',
                     output_index: state.currentOutputIndex,
@@ -121,15 +131,18 @@ export function processChatStreamChunkForResponses(
                 state.currentTextBlockOpen = true;
             } else {
                 const lastText = state.textItems[state.textItems.length - 1];
-                if ( lastText ) lastText.text += content;
+                if ( lastText ) lastText.text += contentToEmit;
             }
 
             emitResponsesEvent( out, 'response.output_text.delta', {
                 type: 'response.output_text.delta',
+                response_id: state.responseId,
+                item_id: state.textItems[state.textItems.length - 1]?.itemId ?? '',
                 output_index: state.currentOutputIndex,
                 content_index: state.contentBlockIndex,
-                delta: content,
+                delta: contentToEmit,
             } );
+            }
         }
 
         // Accumulate tool calls from delta
@@ -156,6 +169,7 @@ export function processChatStreamChunkForResponses(
     // Handle finish_reason — check regardless of whether delta exists
     if ( finishReason && finishReason !== 'null' ) {
         flushReasoningBuffer( state, out );
+        parseDsmlToolCalls( state );
         closeReasoningBlock( state, out );
         if ( state.currentTextBlockOpen ) {
             const lastTextItem = state.textItems[state.textItems.length - 1];
@@ -205,4 +219,37 @@ function flushReasoningBuffer( state: ResponsesStreamState, out: string[] ): voi
         content_index: state.contentBlockIndex,
         delta: buf,
     } );
+}
+
+const DSML_START = '<｜｜DSML｜｜tool_calls>';
+
+function consumeDsmlContent( content: string, state: ResponsesStreamState ): string {
+    const existing = state.dsmlBuffer;
+    if ( existing ) {
+        state.dsmlBuffer += content;
+        return '';
+    }
+    const start = content.indexOf( DSML_START );
+    if ( start < 0 ) return content;
+    state.dsmlBuffer = content.slice( start );
+    return content.slice( 0, start );
+}
+
+function parseDsmlToolCalls( state: ResponsesStreamState ): void {
+    if ( !state.dsmlBuffer || state.toolCalls.length > 0 ) return;
+    const invokeRe = /<｜｜DSML｜｜invoke\s+name="([^"]+)"[^>]*>([\s\S]*?)<\/?｜｜DSML｜｜invoke>/g;
+    let match: RegExpExecArray | null;
+    while ( ( match = invokeRe.exec( state.dsmlBuffer ) ) !== null ) {
+        const args: Record<string, string> = {};
+        const parameterRe = /<｜｜DSML｜｜parameter\s+name="([^"]+)"[^>]*>([\s\S]*?)<\/?｜｜DSML｜｜parameter>/g;
+        let parameter: RegExpExecArray | null;
+        while ( ( parameter = parameterRe.exec( match[2] ?? '' ) ) !== null ) {
+            args[parameter[1]!] = parameter[2]!.trim();
+        }
+        state.toolCalls.push( {
+            id: generateId( 'call' ),
+            name: match[1]!,
+            arguments: JSON.stringify( args ),
+        } );
+    }
 }

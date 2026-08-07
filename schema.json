@@ -712,6 +712,12 @@
                 "description": "If false, disables this provider as a fallback for unknown models or exhausted exact-model providers",
                 "type": "boolean"
               },
+              "groupSpace": {
+                "default": "default",
+                "description": "Provider group: auto-edge and fallback only route within the same group",
+                "type": "string",
+                "minLength": 1
+              },
               "extra": {
                 "default": {
                   "isGemini": false
@@ -768,6 +774,7 @@
               "baseUrl",
               "apiKey",
               "randomRouting",
+              "groupSpace",
               "extra"
             ],
             "additionalProperties": false
@@ -1046,6 +1053,12 @@
                 "description": "If false, disables this provider as a fallback for unknown models or exhausted exact-model providers",
                 "type": "boolean"
               },
+              "groupSpace": {
+                "default": "default",
+                "description": "Provider group: auto-edge and fallback only route within the same group",
+                "type": "string",
+                "minLength": 1
+              },
               "extra": {
                 "default": {
                   "isGemini": false
@@ -1099,6 +1112,7 @@
               "baseUrl",
               "apiKey",
               "randomRouting",
+              "groupSpace",
               "extra"
             ],
             "additionalProperties": false

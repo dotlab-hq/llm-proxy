@@ -424,8 +424,9 @@ export class AnthropicProxy {
     };
   }
 
-  private getBackendsForModel( modelName: string, requiredModalities: readonly Modality[] = ['text'] ): OpenAIModelConfig[] {
-    const cacheKey = this.buildRouteCacheKey( modelName, requiredModalities );
+  private getBackendsForModel( modelName: string, requiredModalities: readonly Modality[] = ['text'], targetGroup?: string ): OpenAIModelConfig[] {
+    const effectiveGroup = targetGroup || 'default';
+    const cacheKey = this.buildRouteCacheKey( modelName, requiredModalities ) + `|${effectiveGroup}`;
     const cached = this.backendRouteCache.get( cacheKey );
     if ( cached ) {
       return cached;
@@ -454,6 +455,10 @@ export class AnthropicProxy {
       }
 
       const matchesRequestedModel = this.configHasModel( config, modelName );
+
+      // Group isolation: only applies to auto-edge (fallback) routing.
+      // Explicit model requests always gather all providers regardless of group.
+      if ( isAutoModel && ( config as any ).groupSpace !== effectiveGroup ) continue;
 
       if ( matchesRequestedModel ) {
         exactBackends.push( config );

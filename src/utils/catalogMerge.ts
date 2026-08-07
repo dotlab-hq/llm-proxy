@@ -70,6 +70,7 @@ export function mergeUnifiedCatalog( providerCatalogs: ProviderCatalog[] ): Unif
     const byId: Record<string, UnifiedModelCatalogEntry> = {};
     const byNormalizedId: Record<string, UnifiedModelCatalogEntry> = {};
     const orderedIds: string[] = [];
+    const orderedIdSet = new Set<string>();
     const allProviderNames = new Set<string>();
 
     providerCatalogs.forEach( catalog => {

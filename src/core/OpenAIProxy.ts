@@ -24,7 +24,8 @@ import { isDebugEnabled, redactForLog } from '@/utils/debug';
 import { applySpoofHeaders } from '@/utils/spoofer';
 import { startStreamHeartbeat } from '@/utils/streamHeartbeat';
 import { resolveOpenAIBody, isSkillResolverReady } from './SkillResolver';
-import { isStringContentOnlyProvider, normalizeMessagesContentToString } from './routing/shared';
+import { isStringContentOnlyProvider, normalizeMessagesContentToString, getRequiredInputModalities, providerSupportsInputModalities, modelSupportsInputModalities, modelEntrySupportsInputModalities } from './routing/shared';
+import type { InputModality } from './routing/shared';
 import {
     convertResponsesRequestToChat,
     convertChatResponseToResponses,
@@ -1096,12 +1097,29 @@ export class OpenAIProxy {
                         console.info( `[${endpoint}] upstream_request model=${selectedModel} body=${JSON.stringify( redactForLog( upstreamBody ) )}` );
                     }
 
-                    const response = await fetchWithProxy( url, {
+                    let response = await fetchWithProxy( url, {
                         method: 'POST',
                         headers: this.buildHeaders( config ),
                         body: JSON.stringify( upstreamBody ),
                     }, CONFIG.proxy, { skipTimeout: upstreamBody.stream === true } );
                     upstreamResponseReceivedAt = Date.now();
+
+                    // A few OpenAI-compatible providers reject Codex's
+                    // function-tool schema while accepting an otherwise
+                    // identical Responses request. Retry once with optional
+                    // tool controls removed so a plain turn can still start.
+                    if ( response.status === 400 && isStreamingResponses && ( upstreamBody.tools || upstreamBody.tool_choice ) ) {
+                        const compatibilityBody = { ...upstreamBody };
+                        delete compatibilityBody.tools;
+                        delete compatibilityBody.tool_choice;
+                        console.warn( `[${endpoint}] 400 from ${config.id} model=${selectedModel} — retrying Codex stream without tools` );
+                        response = await fetchWithProxy( url, {
+                            method: 'POST',
+                            headers: this.buildHeaders( config ),
+                            body: JSON.stringify( compatibilityBody ),
+                        }, CONFIG.proxy, { skipTimeout: true } );
+                        upstreamResponseReceivedAt = Date.now();
+                    }
 
                     backendCooldownManager.markFromStatus( config.id, selectedModel, response.status );
                     if ( response.status === 429 ) {
@@ -1131,7 +1149,10 @@ export class OpenAIProxy {
                             payload: await this.parseResponsePayload( response ),
                         };
                         this.providerStats.recordFailure( config.id, selectedModel, upstreamResponseReceivedAt - upstreamRequestStartedAt );
-                        console.error( `[${endpoint}] ${response.status} from ${config?.id ?? config?.name} — skipping streaming path` );
+                        const upstreamMessage = lastFailure.payload?.error?.message
+                            || lastFailure.payload?.message
+                            || ( typeof lastFailure.payload === 'string' ? lastFailure.payload : undefined );
+                        console.error( `[${endpoint}] ${response.status} from ${config?.id ?? config?.name} model=${selectedModel} — skipping streaming path${upstreamMessage ? `: ${String( upstreamMessage ).slice( 0, 300 )}` : ''}` );
                         // For streaming Responses API, emit SSE error so the
                         // client doesn't hang waiting for response.completed.
                         if ( isStreamingResponses ) {
@@ -2054,8 +2075,9 @@ export class OpenAIProxy {
         return null;
     }
 
-    private getBackendsForModel( modelName: string, endpoint?: string ): OpenAIModelConfig[] {
-        const cacheKey = `${modelName}|${endpoint ?? ''}`;
+    private getBackendsForModel( modelName: string, endpoint?: string, targetGroup?: string ): OpenAIModelConfig[] {
+        const effectiveGroup = targetGroup || 'default';
+        const cacheKey = `${modelName}|${endpoint ?? ''}|${effectiveGroup}`;
         const cached = this.backendRouteCache.get( cacheKey );
         if ( cached ) {
             return cached;
@@ -2074,6 +2096,11 @@ export class OpenAIProxy {
 
         for ( const config of configs ) {
             const matchesRequestedModel = this.configHasModel( config, modelName );
+
+            // Group isolation: only applies to auto-edge (fallback) routing.
+            // Explicit model requests always gather all providers regardless of group.
+            if ( isAutoModel && ( config as any ).groupSpace !== effectiveGroup ) continue;
+
             const canRouteWithoutModelMatch = ( isAutoModel || config.randomRouting !== false ) && !matchesRequestedModel;
 
             // For capability-specific endpoints, only consider providers that explicitly support them.
@@ -3102,6 +3129,7 @@ export class OpenAIProxy {
         responseId: string;
         model: string;
         stream?: boolean;
+        targetGroup?: string;
     } ): Promise<{ status: number; payload?: any; response?: Response; providerId?: string; selectedModel?: string }> {
         const requestStartedAt = Date.now();
         const modelName = options.model;
@@ -3113,7 +3141,7 @@ export class OpenAIProxy {
             };
         }
 
-        const matchingBackends = this.getBackendsForModel( modelName, endpoint );
+        const matchingBackends = this.getBackendsForModel( modelName, endpoint, options.targetGroup );
         if ( !matchingBackends.length ) {
             console.error( `[ws:${endpoint}] No backends found for model: ${modelName}` );
             return {

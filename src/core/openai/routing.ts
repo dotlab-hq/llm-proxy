@@ -1,5 +1,6 @@
 import { stripFreeModifier } from '@/utils/modelIds';
 import { CONFIG } from '@/utils/schema.lookup';
+import { isDebugEnabled } from '@/utils/debug';
 import { FAST_MODEL_HINTS } from './types';
 import type { BackendState, OpenAIModelConfig } from './types';
 import {
@@ -12,7 +13,14 @@ import {
     isImageOnlyConfig,
     isSttEnabled,
     isTtsEnabled,
+    getRequiredInputModalities,
+    providerSupportsInputModalities,
+    modelSupportsInputModalities,
+    modelEntrySupportsInputModalities,
+    getGroupSpace,
+    DEFAULT_GROUP_SPACE,
 } from '../routing/shared';
+import type { InputModality } from '../routing/shared';
 import { backendCooldownManager } from '../BackendCooldownManager';
 
 export {
@@ -25,7 +33,12 @@ export {
     isImageOnlyConfig,
     isSttEnabled,
     isTtsEnabled,
+    getRequiredInputModalities,
+    providerSupportsInputModalities,
+    modelSupportsInputModalities,
+    modelEntrySupportsInputModalities,
 };
+export type { InputModality };
 
 const MAX_CACHE_SIZE = 1000;
 const BACKEND_CACHE_TTL_MS = 10_000;  // Reduced from 30s for faster recovery when providers change health
@@ -46,21 +59,30 @@ export function getBackendsForModel(
     state: BackendState,
     modelName: string,
     endpoint?: string,
+    requiredModalities: readonly InputModality[] = ['text'],
+    targetGroup: string = DEFAULT_GROUP_SPACE,
 ): OpenAIModelConfig[] {
-    const cacheKey = `${modelName}|${endpoint ?? ''}`;
+    const cacheKey = `${modelName}|${endpoint ?? ''}|${[...requiredModalities].sort().join( ',' )}|${targetGroup}`;
     const cached = state.backendRouteCache.get( cacheKey );
     if ( cached ) return cached;
 
     const configs = CONFIG.models.openai ?? [];
     const explicitlyAuto = isAutoModel( modelName );
-    const modelIsListed = configs.some( config => configHasModel( config, modelName ) );
+    const normalizedModelName = stripFreeModifier( modelName ).normalizedId;
+    const modelIsListed = configs.some( config => configHasModel( config, modelName, normalizedModelName ) );
     const isAutoModelFlag = explicitlyAuto || !modelIsListed;
 
     const exactBackends: OpenAIModelConfig[] = [];
     const fallbackBackends: OpenAIModelConfig[] = [];
 
     for ( const config of configs ) {
-        const matchesRequestedModel = configHasModel( config, modelName );
+        const matchesRequestedModel = configHasModel( config, modelName, normalizedModelName );
+
+        // Auto/fallback routing is group-scoped. Explicit model requests may
+        // discover all exact providers first; their fallback providers are
+        // restricted to the exact provider groups below.
+        if ( isAutoModelFlag && getGroupSpace( config ) !== targetGroup ) continue;
+
         const canRouteWithoutModelMatch = ( isAutoModelFlag || config.randomRouting !== false ) && !matchesRequestedModel;
 
         if ( endpoint === 'embeddings' ) {
@@ -78,6 +100,13 @@ export function getBackendsForModel(
             if ( isSttOrImageOnlyConfig( config ) || isEmbeddingsEnabled( config ) ) continue;
         }
 
+        // Text chat endpoints: only route to providers that declare support
+        // for every input modality the request uses (e.g. image requests must
+        // not hit text-only providers, which reject `image_url` content).
+        if ( isTextChatEndpoint( endpoint ) && !providerSupportsInputModalities( config, requiredModalities ) ) {
+            continue;
+        }
+
         if ( matchesRequestedModel ) {
             exactBackends.push( config );
         } else if ( canRouteWithoutModelMatch ) {
@@ -87,15 +116,23 @@ export function getBackendsForModel(
 
     const result = isAutoModelFlag
         ? fallbackBackends
-        : modelIsListed ? [...exactBackends, ...fallbackBackends] : fallbackBackends;
+        : modelIsListed
+            ? [
+                ...exactBackends,
+                ...fallbackBackends.filter( fb => {
+                    const fbGroup = getGroupSpace( fb );
+                    return exactBackends.some( eb => getGroupSpace( eb ) === fbGroup );
+                } )
+              ]
+            : fallbackBackends;
 
     // Deduplicate by baseUrl+apiKey to prevent the routing loop from
     // trying the same physical upstream multiple times in a single request.
     // Without this, multiple API keys for the same provider cause severe
     // delays as the proxy iterates through identical endpoints.
-    console.info( `[routing] getBackendsForModel pre-dedup count=${result.length} ids=${result.map( b => b.id ).join( ', ' )}` );
+    if ( isDebugEnabled() ) console.info( `[routing] getBackendsForModel pre-dedup count=${result.length} ids=${result.map( b => b.id ).join( ', ' )}` );
     const deduped = dedupeBackends( result ).slice( 0, MAX_FALLBACK_BACKENDS );
-    console.info( `[routing] getBackendsForModel post-dedup count=${deduped.length} ids=${deduped.map( b => b.id ).join( ', ' )}` );
+    if ( isDebugEnabled() ) console.info( `[routing] getBackendsForModel post-dedup count=${deduped.length} ids=${deduped.map( b => b.id ).join( ', ' )}` );
 
     if ( state.backendRouteCache.size > MAX_CACHE_SIZE ) {
         const firstKey = state.backendRouteCache.keys().next().value;
@@ -162,20 +199,30 @@ export function getOptimizedBackends(
     modelName: string,
     endpoint: string | undefined,
     backends: OpenAIModelConfig[],
+    requiredModalities: readonly InputModality[] = ['text'],
 ): OpenAIModelConfig[] {
     if ( backends.length <= 1 ) return backends;
 
-    const cacheKey = `${endpoint ?? 'default'}:${modelName}`;
+    // The eligible backend list is group-scoped and can differ for the same
+    // model depending on the request's routing group. Include it in the key
+    // so a previously cached mixed-group result can never leak into fallback.
+    const eligibleBackendKey = backends.map( backend => backend.id ).sort().join( ',' );
+    const cacheKey = `${endpoint ?? 'default'}:${modelName}:${[...requiredModalities].sort().join( ',' )}:${eligibleBackendKey}`;
     const cached = state.optimizedBackendCache.get( cacheKey );
     if ( cached && cached.expiresAt > Date.now() ) return cached.backends;
 
     const rotated = getRoundRobinBackends( state, cacheKey, backends );
     const sorted = rotated.sort( ( left, right ) =>
-        scoreProvider( state, right, modelName ) - scoreProvider( state, left, modelName )
+        scoreProvider( state, right, modelName, requiredModalities ) - scoreProvider( state, left, modelName, requiredModalities )
     );
 
+    const primaryBackend = sorted[0];
+    const groupIsolatedSorted = primaryBackend
+        ? sorted.filter( b => getGroupSpace( b ) === getGroupSpace( primaryBackend ) )
+        : sorted;
+
     state.optimizedBackendCache.set( cacheKey, {
-        backends: sorted,
+        backends: groupIsolatedSorted,
         expiresAt: Date.now() + BACKEND_CACHE_TTL_MS,
     } );
 
@@ -184,11 +231,11 @@ export function getOptimizedBackends(
         if ( firstKey ) state.optimizedBackendCache.delete( firstKey );
     }
 
-    return sorted;
+    return groupIsolatedSorted;
 }
 
-export function scoreProvider( state: BackendState, config: OpenAIModelConfig, requestedModel: string ): number {
-    const candidateModels = getCandidateModelsForProvider( state, config, requestedModel );
+export function scoreProvider( state: BackendState, config: OpenAIModelConfig, requestedModel: string, requiredModalities: readonly InputModality[] = ['text'] ): number {
+    const candidateModels = getCandidateModelsForProvider( state, config, requestedModel, requiredModalities );
     const firstModel = candidateModels[0] ?? requestedModel;
     const stats = state.providerStats.getStats( config.id, firstModel );
 
@@ -227,11 +274,12 @@ export function scoreProvider( state: BackendState, config: OpenAIModelConfig, r
         - failurePenalty - noveltyPenalty;
 }
 
-export function getCandidateModelsForProvider( state: BackendState, config: OpenAIModelConfig, requestedModel: string ): string[] {
+export function getCandidateModelsForProvider( state: BackendState, config: OpenAIModelConfig, requestedModel: string, requiredModalities: readonly InputModality[] = ['text'] ): string[] {
     const explicitlyAuto = isAutoModel( requestedModel );
+    const requestedNormalizedId = stripFreeModifier( requestedModel ).normalizedId;
     const modelInThisProvider = config.models.some( m => {
         const candidate = typeof m === 'string' ? m : ( m as any ).model;
-        return stripFreeModifier( candidate ).normalizedId === stripFreeModifier( requestedModel ).normalizedId;
+        return stripFreeModifier( candidate ).normalizedId === requestedNormalizedId;
     } );
     const isAutoModelFlag = explicitlyAuto || !modelInThisProvider;
 
@@ -252,11 +300,20 @@ export function getCandidateModelsForProvider( state: BackendState, config: Open
         } );
     };
 
+    // Explicitly requested models must declare support for every required
+    // input modality, or we cannot route them (e.g. a text-only model cannot
+    // serve an image request).
+    if ( !isAutoModelFlag && !modelSupportsInputModalities( config, requestedModel, requiredModalities ) ) {
+        return [];
+    }
+
     if ( config.randomRouting === false && !isAutoModelFlag ) {
         return filterHealthy( [requestedModel] );
     }
 
-    const modelNames = config.models.map( m => ( typeof m === 'string' ? m : ( m as any ).model ) );
+    const modelNames = config.models
+        .filter( model => modelEntrySupportsInputModalities( config, model, requiredModalities ) )
+        .map( m => ( typeof m === 'string' ? m : ( m as any ).model ) );
     if ( !isAutoModelFlag ) {
         return filterHealthy( [requestedModel] );
     }

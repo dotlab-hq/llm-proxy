@@ -6,7 +6,7 @@ export function isAutoModel( modelName: string ): boolean {
     return stripFreeModifier( modelName ).normalizedId === 'auto';
 }
 
-export function configHasModel( config: AnyProviderConfig, modelName: string ): boolean {
+export function configHasModel( config: AnyProviderConfig, modelName: string, normalizedModelName?: string ): boolean {
     const requestedNormalized = stripFreeModifier( modelName ).normalizedId;
     return config.models.some( ( m: any ) => {
         const candidate = typeof m === 'string' ? m : m.model;
@@ -53,7 +53,13 @@ export function isNonTextSpecializedConfig( config: AnyProviderConfig ): boolean
 }
 
 export function isGeminiProvider( config: AnyProviderConfig ): boolean {
-    return config.extra?.isGemini === true;
+  return config.extra?.isGemini === true;
+}
+
+export const DEFAULT_GROUP_SPACE = 'default';
+
+export function getGroupSpace( config: AnyProviderConfig ): string {
+  return config?.groupSpace || DEFAULT_GROUP_SPACE;
 }
 
 export function isStringContentOnlyProvider( config: AnyProviderConfig ): boolean {
@@ -61,6 +67,93 @@ export function isStringContentOnlyProvider( config: AnyProviderConfig ): boolea
     const id = typeof config?.id === 'string' ? config.id.toLowerCase() : '';
     const name = typeof config?.name === 'string' ? config.name.toLowerCase() : '';
     return baseUrl.includes( 'sarvam.ai' ) || id.includes( 'sarvam' ) || name.includes( 'sarvam' );
+}
+
+export type InputModality = 'text' | 'image' | 'audio' | 'file' | 'pdf';
+
+export const DEFAULT_INPUT_MODALITIES: readonly InputModality[] = ['text', 'image', 'audio', 'file'];
+
+/**
+ * Inspect a chat-style request body and return the input modalities it
+ * actually uses (always includes 'text'). Used to prefer backends whose
+ * declared `modalities.input` can serve the request, mirroring the
+ * modality gating that already exists in the Anthropic flow.
+ */
+export function getRequiredInputModalities( body: any ): InputModality[] {
+    const modalities = new Set<InputModality>( ['text'] );
+
+    for ( const message of Array.isArray( body?.messages ) ? body.messages : [] ) {
+        const content = message?.content;
+        if ( !Array.isArray( content ) ) continue;
+
+        for ( const block of content ) {
+            if ( !block || typeof block !== 'object' ) continue;
+            const type = ( block as Record<string, unknown> ).type;
+            if ( type === 'image' || type === 'image_url' || type === 'input_image' ) {
+                modalities.add( 'image' );
+            } else if ( type === 'audio' || type === 'input_audio' ) {
+                modalities.add( 'audio' );
+            } else if ( type === 'file' || type === 'input_file' || type === 'document' ) {
+                modalities.add( 'file' );
+            }
+        }
+    }
+
+    return Array.from( modalities );
+}
+
+/**
+ * Whether a provider declares support for every required input modality.
+ * String-content-only providers (e.g. Sarvam) are always routable — their
+ * content is flattened to text downstream by normalizeMessagesContentToString.
+ * Providers/models with omitted `modalities` fall back to the default
+ * (text + image + audio + file), matching the config schema default.
+ */
+export function providerSupportsInputModalities( config: AnyProviderConfig, requiredModalities: readonly InputModality[] ): boolean {
+    if ( isStringContentOnlyProvider( config ) ) return true;
+
+    const providerModalities = new Set<InputModality>(
+        config?.modalities?.input ?? DEFAULT_INPUT_MODALITIES,
+    );
+    if ( requiredModalities.every( modality => providerModalities.has( modality ) ) ) return true;
+
+    // A per-model modality override may be broader than the provider default.
+    return ( config?.models ?? [] ).some( ( model: any ) =>
+        modelEntrySupportsInputModalities( config, model, requiredModalities ),
+    );
+}
+
+/**
+ * Whether a specific requested model supports the required input modalities.
+ * Falls back to provider-level modalities when the model has no override.
+ */
+export function modelSupportsInputModalities( config: AnyProviderConfig, modelName: string, requiredModalities: readonly InputModality[] ): boolean {
+    if ( isStringContentOnlyProvider( config ) ) return true;
+
+    const requestedNormalized = stripFreeModifier( modelName ).normalizedId;
+    const modelEntry = ( config?.models ?? [] ).find( ( model: any ) => {
+        const candidate = typeof model === 'string' ? model : model?.model;
+        return stripFreeModifier( candidate ).normalizedId === requestedNormalized;
+    } );
+
+    return modelEntry
+        ? modelEntrySupportsInputModalities( config, modelEntry, requiredModalities )
+        : providerSupportsInputModalities( config, requiredModalities );
+}
+
+export function modelEntrySupportsInputModalities(
+    config: AnyProviderConfig,
+    model: any,
+    requiredModalities: readonly InputModality[],
+): boolean {
+    if ( isStringContentOnlyProvider( config ) ) return true;
+
+    const modalities = new Set<InputModality>(
+        typeof model === 'object' && model !== null
+            ? ( model?.modalities?.input ?? config?.modalities?.input ?? DEFAULT_INPUT_MODALITIES )
+            : ( config?.modalities?.input ?? DEFAULT_INPUT_MODALITIES ),
+    );
+    return requiredModalities.every( modality => modalities.has( modality ) );
 }
 
 export function normalizeMessagesContentToString( body: any ): any {

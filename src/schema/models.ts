@@ -53,6 +53,7 @@ export const OpenAIModelSchema = z.object( {
   apiKey: z.string( { error: 'apiKey is required' } ).min( 1, 'apiKey cannot be empty' ),
   rateLimit: RateLimitSchema,
   randomRouting: z.boolean( { error: 'randomRouting must be a boolean' } ).default( true ).describe( 'If false, disables this provider as a fallback for unknown models or exhausted exact-model providers' ),
+  groupSpace: z.string( { error: 'groupSpace must be a string' } ).min( 1, 'groupSpace cannot be empty' ).default( 'default' ).describe( 'Provider group: auto-edge and fallback only route within the same group' ),
   extra: z.object( { isGemini: z.boolean( { error: 'extra.isGemini must be a boolean' } ).default( false ) } ).default( { isGemini: false } ),
   ...ReasoningConfigFields,
 } )
@@ -114,6 +115,7 @@ export const AnthropicModelSchema = z.object( {
   apiKey: z.string( { error: 'apiKey is required' } ).min( 1, 'apiKey cannot be empty' ),
   rateLimit: RateLimitSchema,
   randomRouting: z.boolean( { error: 'randomRouting must be a boolean' } ).default( true ).describe( 'If false, disables this provider as a fallback for unknown models or exhausted exact-model providers' ),
+  groupSpace: z.string( { error: 'groupSpace must be a string' } ).min( 1, 'groupSpace cannot be empty' ).default( 'default' ).describe( 'Provider group: auto-edge and fallback only route within the same group' ),
   extra: z.object( { isGemini: z.boolean( { error: 'extra.isGemini must be a boolean' } ).default( false ) } ).default( { isGemini: false } ),
   ...ReasoningConfigFields,
 } )

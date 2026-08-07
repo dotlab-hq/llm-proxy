@@ -23,6 +23,32 @@ export function buildHeaders( config: OpenAIModelConfig ): Record<string, string
     return headers;
 }
 
+/**
+ * Remove the internal `extra.gemini` marker flag before sending the body
+ * upstream — it is only used by the proxy for provider classification.
+ * Returns the original body when nothing needs stripping (no allocation).
+ */
+export function stripGeminiOption( body: any ): any {
+    if ( body?.extra?.gemini !== true ) return body;
+    const { extra, ...rest } = body;
+    const { gemini, ...remainingExtra } = extra;
+    return Object.keys( remainingExtra ).length ? { ...rest, extra: remainingExtra } : rest;
+}
+
+// Hoisted module-level sets: collectTokenStrings runs per upstream candidate
+// (multiple times per request), and allocating two Sets on every call adds
+// avoidable garbage. These are read-only lookup tables.
+const COUNTABLE_KEYS = new Set( [
+    'content', 'text', 'input', 'prompt', 'instructions', 'messages', 'message',
+    'choices', 'output', 'tool_calls', 'function_call', 'arguments', 'code', 'logs',
+    'refusal', 'query', 'queries', 'variables', 'delta', 'file_data', 'file_url', 'image_url',
+] );
+const IGNORED_KEYS = new Set( [
+    'annotations', 'metadata', 'usage', 'error', 'id', 'role', 'status', 'type', 'object',
+    'model', 'created', 'created_at', 'finish_reason', 'index', 'system_fingerprint',
+    'incomplete_details', 'reason',
+] );
+
 export function collectTokenStrings( value: any ): string[] {
     if ( value == null ) return [];
     if ( typeof value === 'string' ) return [value];
@@ -30,20 +56,9 @@ export function collectTokenStrings( value: any ): string[] {
     if ( Array.isArray( value ) ) return value.flatMap<string>( item => collectTokenStrings( item ) );
     if ( typeof value !== 'object' ) return [];
 
-    const countableKeys = new Set( [
-        'content', 'text', 'input', 'prompt', 'instructions', 'messages', 'message',
-        'choices', 'output', 'tool_calls', 'function_call', 'arguments', 'code', 'logs',
-        'refusal', 'query', 'queries', 'variables', 'delta', 'file_data', 'file_url', 'image_url',
-    ] );
-    const ignoredKeys = new Set( [
-        'annotations', 'metadata', 'usage', 'error', 'id', 'role', 'status', 'type', 'object',
-        'model', 'created', 'created_at', 'finish_reason', 'index', 'system_fingerprint',
-        'incomplete_details', 'reason',
-    ] );
-
     return Object.entries( value ).flatMap<string>( ( [key, nestedValue] ) => {
-        if ( ignoredKeys.has( key ) ) return [];
-        if ( countableKeys.has( key ) ) return collectTokenStrings( nestedValue );
+        if ( IGNORED_KEYS.has( key ) ) return [];
+        if ( COUNTABLE_KEYS.has( key ) ) return collectTokenStrings( nestedValue );
         return [];
     } );
 }
@@ -177,8 +192,31 @@ export function ensureToolCallThoughtSignatures( body: any ): any {
     return { ...body, messages };
 }
 
+/**
+ * Thinking-compatible OpenAI providers (notably DeepSeek via gateway
+ * providers) require reasoning_content to be replayed on assistant tool-call
+ * messages. Some upstreams omit it when converting Gemini/native responses.
+ * Preserve whichever reasoning field we received and provide an empty value
+ * when the provider only validates the field's presence.
+ */
+export function ensureToolCallReasoningContent( body: any ): any {
+    if ( !body || typeof body !== 'object' || !Array.isArray( body.messages ) ) return body;
+    let changed = false;
+    const messages = body.messages.map( ( message: any ) => {
+        if ( !message || message.role !== 'assistant' || !Array.isArray( message.tool_calls ) ) return message;
+        if ( Object.prototype.hasOwnProperty.call( message, 'reasoning_content' ) ) return message;
+        const reasoning = typeof message.reasoning === 'string'
+            ? message.reasoning
+            : typeof message.thinking === 'string' ? message.thinking : '';
+        changed = true;
+        return { ...message, reasoning_content: reasoning };
+    } );
+    return changed ? { ...body, messages } : body;
+}
+
+const REDIRECT_STATUSES = new Set( [301, 302, 303, 307, 308] );
 export function isRedirectStatus( status: number ): boolean {
-    return [301, 302, 303, 307, 308].includes( status );
+    return REDIRECT_STATUSES.has( status );
 }
 
 export function extractModelFromLocation( location: string ): string | null {

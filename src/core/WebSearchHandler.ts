@@ -67,11 +67,25 @@ export class WebSearchHandler {
 
   shouldUseAnthropicWebSearch(body: any): boolean {
     const tools = Array.isArray(body?.tools) ? body.tools : [];
-    return tools.some((tool: any) =>
+    const hasWebSearchTool = tools.some((tool: any) =>
       tool?.name === 'web_search'
       || (typeof tool?.type === 'string' && tool.type.startsWith('web_search_'))
       || tool?.type === 'web_search'
     );
+
+    if (!hasWebSearchTool) return false;
+
+    // Hermes includes the server tool definition on every request. The
+    // definition only makes the tool available; it does not mean that the
+    // model chose to use it. Searching here on tool availability caused an
+    // external search for every ordinary turn. Only honor an explicit tool
+    // choice, while leaving `auto` (and an omitted choice) to the model.
+    const toolChoice = body?.tool_choice;
+    if (typeof toolChoice === 'string') {
+      return toolChoice === 'web_search';
+    }
+    return toolChoice?.type === 'tool'
+      && (toolChoice?.name === 'web_search' || toolChoice?.tool?.name === 'web_search');
   }
 
   extractAnthropicWebSearchQuery(body: any): string | null {

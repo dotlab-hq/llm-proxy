@@ -7,6 +7,7 @@ import {
     getBackendsForModel,
     getOptimizedBackends,
     getCandidateModelsForProvider,
+    getRequiredInputModalities,
     isGeminiProvider,
 } from './routing';
 import {
@@ -17,16 +18,12 @@ import {
     isRedirectStatus,
     extractModelFromLocation,
     getEffectiveRateLimit,
+    stripGeminiOption,
+    ensureToolCallReasoningContent,
 } from './helpers';
+import { isDebugEnabled } from '@/utils/debug';
 import { withGeminiThinking, withReasoningEffort } from './reasoning';
 import type { BackendState, OpenAIModelConfig } from './types';
-
-function stripGeminiOption( body: any ): any {
-    if ( body?.extra?.gemini !== true ) return body;
-    const { extra, ...rest } = body;
-    const { gemini, ...remainingExtra } = extra;
-    return Object.keys( remainingExtra ).length ? { ...rest, extra: remainingExtra } : rest;
-}
 
 export async function processUpstreamWithFallback(
     state: BackendState,
@@ -36,6 +33,7 @@ export async function processUpstreamWithFallback(
         responseId: string;
         model: string;
         stream?: boolean;
+        targetGroup?: string;
     },
 ): Promise<{ status: number; payload?: any; response?: Response; providerId?: string; selectedModel?: string }> {
     const requestStartedAt = Date.now();
@@ -48,7 +46,9 @@ export async function processUpstreamWithFallback(
         };
     }
 
-    const matchingBackends = getBackendsForModel( state, modelName, endpoint );
+    const requiredModalities = getRequiredInputModalities( body );
+
+    const matchingBackends = getBackendsForModel( state, modelName, endpoint, requiredModalities, options.targetGroup );
     if ( !matchingBackends.length ) {
         console.error( `[ws:${endpoint}] No backends found for model: ${modelName}` );
         return {
@@ -57,11 +57,15 @@ export async function processUpstreamWithFallback(
         };
     }
 
-    const backends = getOptimizedBackends( state, modelName, endpoint, matchingBackends );
-    console.error( `[ws:${endpoint}] Attempting backends for model ${modelName}: ${backends.map( b => b.id ).join( ', ' )}` );
+    const backends = getOptimizedBackends( state, modelName, endpoint, matchingBackends, requiredModalities );
+    if ( isDebugEnabled() ) console.info( `[ws:${endpoint}] Attempting backends for model ${modelName}: ${backends.map( b => b.id ).join( ', ' )}` );
+
+    // url/headers depend only on (config, endpoint) — reuse across the config's
+    // candidate models instead of rebuilding per candidate.
+    const requestPlanCache = new Map<string, { url: string; headers: Record<string, string> }>();
 
     for ( const config of backends ) {
-        const candidateModels = getCandidateModelsForProvider( state, config, modelName );
+        const candidateModels = getCandidateModelsForProvider( state, config, modelName, requiredModalities );
 
         for ( const selectedModel of candidateModels ) {
             const cooldownRemainingMs = backendCooldownManager.getRemainingMs( config.id, selectedModel );
@@ -69,7 +73,8 @@ export async function processUpstreamWithFallback(
 
             const requestWithModel = { ...body, model: selectedModel };
             const withReasoning = withReasoningEffort( requestWithModel, config, selectedModel );
-            const upstreamBodyRaw = isGeminiProvider( config ) ? ensureToolCallThoughtSignatures( withGeminiThinking( withReasoning, selectedModel ) ) : stripGeminiOption( withReasoning );
+            const reasoningCompatible = ensureToolCallReasoningContent( withReasoning );
+            const upstreamBodyRaw = isGeminiProvider( config ) ? ensureToolCallThoughtSignatures( withGeminiThinking( reasoningCompatible, selectedModel ) ) : stripGeminiOption( reasoningCompatible );
             const upstreamBody = isStringContentOnlyProvider( config )
                 ? normalizeMessagesContentToString( upstreamBodyRaw )
                 : upstreamBodyRaw;
@@ -80,10 +85,14 @@ export async function processUpstreamWithFallback(
             if ( !rateCheck.allowed ) continue;
 
             try {
-                const url = buildApiUrl( config, endpoint );
-                const upstreamResponse = await fetchWithProxy( url, {
+                let requestPlan = requestPlanCache.get( config.id );
+                if ( !requestPlan ) {
+                    requestPlan = { url: buildApiUrl( config, endpoint ), headers: buildHeaders( config ) };
+                    requestPlanCache.set( config.id, requestPlan );
+                }
+                const upstreamResponse = await fetchWithProxy( requestPlan.url, {
                     method: 'POST',
-                    headers: buildHeaders( config ),
+                    headers: requestPlan.headers,
                     body: JSON.stringify( upstreamBody ),
                 }, CONFIG.proxy, { skipTimeout: upstreamBody.stream === true } );
 

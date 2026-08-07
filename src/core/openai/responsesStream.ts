@@ -103,7 +103,12 @@ export async function streamResponsesConverted(
 
             const processChunk = ( buf: string ): string => {
                 const out: string[] = [];
-                const parts = buf.split( '\n\n' );
+                // SSE permits CRLF line endings. Normalize them before looking
+                // for event boundaries; otherwise an upstream using \r\n\r\n
+                // produces no parsed chat chunks and we emit only an empty
+                // response.completed event.
+                const normalized = buf.replace( /\r\n/g, '\n' ).replace( /\r/g, '\n' );
+                const parts = normalized.split( '\n\n' );
                 const remainder = parts.pop() ?? '';
 
                 for ( const block of parts ) {
@@ -178,6 +183,10 @@ export async function streamResponsesConverted(
                         if ( value ) sseBuffer += decoder.decode( value, { stream: true } );
                         sseBuffer = processChunk( sseBuffer );
                     }
+                    // Flush a UTF-8 character that may be buffered by the
+                    // streaming decoder before processing the final SSE event.
+                    const decoderTail = decoder.decode();
+                    if ( decoderTail ) sseBuffer += decoderTail;
                     if ( sseBuffer.trim() && !clientDisconnected ) processChunk( sseBuffer + '\n\n' );
                 } catch ( err: any ) {
                     console.error( `[${endpoint}] Streaming error: ${err?.message || String( err )} provider=${providerId} model=${selectedModel}` );

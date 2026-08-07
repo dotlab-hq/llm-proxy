@@ -19,6 +19,7 @@ export function createResponsesStreamState( request: ResponsesRequest, requestSt
         firstEmissionLogged: false,
         textItems: [],
         toolCalls: [],
+        dsmlBuffer: '',
         reasoningItems: [],
         currentReasoningBlockOpen: false,
         reasoningBuffer: '',
