@@ -2330,11 +2330,9 @@ export class OpenAIProxy {
             return backends;
         }
 
-        // The eligible backend list is group-scoped and can differ for the same
-        // model depending on the request's routing group. Include it in the key
-        // so a previously cached mixed-group result can never leak into fallback.
-        const eligibleBackendKey = backends.map( backend => backend.id ).sort().join( ',' );
-        const cacheKey = `${endpoint ?? 'default'}:${modelName}:${eligibleBackendKey}`;
+        // Derive an effective group from the passed backends to build a fast cache key
+        const groupSpace = ( backends[0] as any )?.groupSpace || 'default';
+        const cacheKey = `${endpoint ?? 'default'}:${modelName}:${groupSpace}`;
         const cached = this.optimizedBackendCache.get( cacheKey );
         if ( cached && cached.expiresAt > Date.now() ) {
             return cached.backends;
@@ -2349,8 +2347,9 @@ export class OpenAIProxy {
         // groupSpace. Without this, a failed gemini-group backend falls back
         // into the default group (and vice versa), breaking group isolation.
         const primaryBackend = sorted[0];
+        const effectiveGroup = (primaryBackend as any)?.groupSpace || 'default';
         const groupIsolatedSorted = primaryBackend
-            ? sorted.filter( b => ( ( b as any ).groupSpace || 'default' ) === ( ( primaryBackend as any ).groupSpace || 'default' ) )
+            ? sorted.filter( b => ( ( b as any ).groupSpace || 'default' ) === effectiveGroup )
             : sorted;
 
         this.optimizedBackendCache.set( cacheKey, {

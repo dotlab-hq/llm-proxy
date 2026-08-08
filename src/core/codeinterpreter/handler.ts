@@ -44,12 +44,13 @@ export class CodeInterpreterHandler {
         request: any,
         config: ProxyBackendConfig & ModelSelectionConfig,
         requestedModel: string,
+        targetGroup: string,
         callModel: ( request: any ) => Promise<{ payload: any; response: Response }>,
         calculateTokenCount: ( body: any ) => number,
         rateLimitManager: { checkAndConsume: ( id: string, tokens: number, limit?: RateLimitConfig, model?: string ) => Promise<{ allowed: boolean }> },
         会话Id?: string
     ): Promise<{ payload: any; toolRuns: CodeInterpreterToolRun[] }> {
-        const matchingBackends = getBackendsForModel( config, requestedModel );
+        const matchingBackends = getBackendsForModel( config, requestedModel, targetGroup );
         if ( !matchingBackends.length ) {
             throw new Error( `No OpenAI backends found for model: ${requestedModel}` );
         }

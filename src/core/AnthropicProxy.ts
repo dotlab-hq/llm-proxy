@@ -105,10 +105,12 @@ export class AnthropicProxy {
 
     if ( this.codeInterpreterHandler.shouldUseCodeInterpreter( body ) ) {
       try {
+        const targetGroup = c.req.header( 'x-group-space' ) || 'default';
         const toolRunResult = await this.codeInterpreterHandler.executeToolLoop(
           body,
           this.getBackendConfigForModel( requestedModel ),
           requestedModel,
+          targetGroup,
           async ( request: any ) => {
             const config = this.getBackendConfigForModel( requestedModel );
             const url = `${this.normalizeBaseUrl( config.baseUrl )}/chat/completions`;
@@ -159,7 +161,8 @@ export class AnthropicProxy {
     }
 
     const endpoint = 'messages';
-    const matchingBackends = this.getBackendsForModel( requestedModel, requiredModalities );
+    const targetGroup = c.req.header( 'x-group-space' ) || 'default';
+    const matchingBackends = this.getBackendsForModel( requestedModel, requiredModalities, targetGroup );
     if ( !matchingBackends.length ) {
       console.error( `[${endpoint}] No OpenAI backends found for model: ${requestedModel}` );
       return c.json( {
