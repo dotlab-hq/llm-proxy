@@ -49,6 +49,21 @@ export function consumeSseBlocks( buffer: string ): { events: string[]; remainde
     };
 }
 
+/**
+ * Some Anthropic-compatible upstreams emit a null content-block index even
+ * though the Anthropic stream schema requires a number. Keep this workaround
+ * deliberately narrow: only a top-level `index: null` is repaired.
+ */
+export function normalizeAnthropicSseEvent<T>( event: T ): T {
+    if ( event && typeof event === 'object' && !Array.isArray( event ) ) {
+        const record = event as Record<string, unknown>;
+        if ( record.index === null ) {
+            return { ...record, index: 0 } as T;
+        }
+    }
+    return event;
+}
+
 export function processSseBlockSync( block: string, state: StreamState, out: SseOut ): boolean {
     const lines = block
         .split( '\n' )
@@ -76,7 +91,7 @@ export function processSseBlockSync( block: string, state: StreamState, out: Sse
 
     let chunk: OpenAIStreamChunk;
     try {
-        chunk = JSON.parse( data ) as OpenAIStreamChunk;
+        chunk = normalizeAnthropicSseEvent( JSON.parse( data ) ) as OpenAIStreamChunk;
     } catch {
         return false;
     }

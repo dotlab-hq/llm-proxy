@@ -52,6 +52,7 @@ export class OpenAIProxy {
     private static readonly BACKEND_CACHE_TTL_MS = 30_000;
     private static readonly MAX_FALLBACK_BACKENDS = 6;  // Cap backends per request to prevent routing loops
     private static readonly MAX_SIBLING_MODELS_PER_PROVIDER = 4;  // Cap sibling-model substitution per provider in the last-resort pass
+    private static readonly MAX_COOLDOWN_WAIT_MS = 15_000;        // Cap how long we'll wait for the shortest cooldown before giving up
 
     constructor() {
         this.app = new Hono();
@@ -1074,7 +1075,8 @@ export class OpenAIProxy {
         //   success, participating (randomRouting !== false) providers in the
         //   same group offer their best sibling models as substitution — the
         //   return benefit of taking part in random routing.
-        const attempts: { config: OpenAIModelConfig; selectedModel: string }[] = [];
+        interface Attempt { config: OpenAIModelConfig; selectedModel: string; isSibling?: boolean }
+        const attempts: Attempt[] = [];
         for ( const config of backends ) {
             const candidateModels = this.getCandidateModelsForProvider( config, modelName );
             for ( const selectedModel of candidateModels ) {
@@ -1085,6 +1087,8 @@ export class OpenAIProxy {
             || !( CONFIG.models.openai ?? [] ).some( c => this.configHasModel( c, modelName ) );
         let attemptIdx = 0;
         let siblingPassAppended = false;
+        let madeUpstreamAttempt = false;
+        let cooldownRetried = false;
 
         while ( true ) {
             if ( attemptIdx >= attempts.length ) {
@@ -1095,17 +1099,37 @@ export class OpenAIProxy {
                     for ( const config of backends ) {
                         const siblings = this.getCandidateModelsForProvider( config, modelName, true );
                         for ( const siblingModel of siblings ) {
-                            attempts.push( { config, selectedModel: siblingModel } );
+                            attempts.push( { config, selectedModel: siblingModel, isSibling: true } );
                         }
                     }
                 } else {
+                    // All attempts consumed without success. If every attempt was
+                    // skipped on cooldown (no real upstream call was made), wait
+                    // for the shortest active cooldown and give the whole plan one
+                    // more pass instead of failing instantly — cooldowns are
+                    // typically only 2-15s, so the request can still succeed.
+                    if ( !madeUpstreamAttempt && !cooldownRetried ) {
+                        const waitMs = this.shortestActiveCooldownMs( attempts );
+                        if ( waitMs > 0 && waitMs <= OpenAIProxy.MAX_COOLDOWN_WAIT_MS ) {
+                            cooldownRetried = true;
+                            console.warn( `[${endpoint}] All backends on cooldown (shortest ${waitMs}ms) — waiting then retrying ${modelName}` );
+                            await new Promise( resolve => setTimeout( resolve, waitMs + 100 ) );
+                            attemptIdx = 0;
+                            continue;
+                        }
+                    }
                     break;
                 }
             }
             if ( attemptIdx >= attempts.length ) break;
-            const { config, selectedModel } = attempts[attemptIdx]!;
+            const { config, selectedModel, isSibling } = attempts[attemptIdx]!;
             attemptIdx++;
-            const cooldownRemainingMs = backendCooldownManager.getRemainingMs( config.id, selectedModel );
+            // Sibling-pass attempts probe through provider-level cooldown
+            // (model-level cooldown still respected) — this is what makes
+            // hopping useful when a whole group is cooldowned.
+            const cooldownRemainingMs = isSibling
+                ? backendCooldownManager.getModelRemainingMs( config.id, selectedModel )
+                : backendCooldownManager.getRemainingMs( config.id, selectedModel );
                 if ( cooldownRemainingMs > 0 ) {
                     console.warn( `[${endpoint}] cooldown_active provider=${config.id} model=${selectedModel} remainingMs=${cooldownRemainingMs}` );
                     continue;
@@ -1150,6 +1174,7 @@ export class OpenAIProxy {
                     continue;
                 }
 
+                madeUpstreamAttempt = true;
                 try {
                     const url = this.buildApiUrl( config, endpoint );
                     upstreamRequestStartedAt = Date.now();
@@ -2460,6 +2485,20 @@ export class OpenAIProxy {
         return [requestedModel];
     }
 
+    /**
+     * Smallest active cooldown remaining across all (provider, model) attempts
+     * in the plan. Returns 0 when nothing is on cooldown.
+     */
+    private shortestActiveCooldownMs( attempts: { config: OpenAIModelConfig; selectedModel: string }[] ): number {
+        let min = 0;
+        for ( const { config, selectedModel } of attempts ) {
+            const remaining = backendCooldownManager.getRemainingMs( config.id, selectedModel );
+            if ( remaining <= 0 ) continue;
+            if ( min === 0 || remaining < min ) min = remaining;
+        }
+        return min;
+    }
+
     private scoreModelForProvider( config: OpenAIModelConfig, modelName: string ): number {
         const stats = this.providerStats.getStats( config.id, modelName );
         const latencyScore = stats?.latencyEwmaMs ? Math.max( 0, 1 - stats.latencyEwmaMs / 30_000 ) : 0.5;
@@ -3253,7 +3292,8 @@ export class OpenAIProxy {
 
         // Two-pass attempt plan (see proxyRequest): exact model first, then
         // sibling models from random-routing participants in the same group.
-        const attempts: { config: OpenAIModelConfig; selectedModel: string }[] = [];
+        interface WsAttempt { config: OpenAIModelConfig; selectedModel: string; isSibling?: boolean }
+        const attempts: WsAttempt[] = [];
         for ( const config of backends ) {
             const candidateModels = this.getCandidateModelsForProvider( config, modelName );
             for ( const selectedModel of candidateModels ) {
@@ -3264,6 +3304,8 @@ export class OpenAIProxy {
             || !( CONFIG.models.openai ?? [] ).some( c => this.configHasModel( c, modelName ) );
         let attemptIdx = 0;
         let siblingPassAppended = false;
+        let madeUpstreamAttempt = false;
+        let cooldownRetried = false;
 
         while ( true ) {
             if ( attemptIdx >= attempts.length ) {
@@ -3273,17 +3315,36 @@ export class OpenAIProxy {
                     for ( const config of backends ) {
                         const siblings = this.getCandidateModelsForProvider( config, modelName, true );
                         for ( const siblingModel of siblings ) {
-                            attempts.push( { config, selectedModel: siblingModel } );
+                            attempts.push( { config, selectedModel: siblingModel, isSibling: true } );
                         }
                     }
                 } else {
+                    // All attempts consumed without success. If every attempt was
+                    // skipped on cooldown (no real upstream call was made), wait
+                    // for the shortest active cooldown and retry the plan once
+                    // instead of failing instantly.
+                    if ( !madeUpstreamAttempt && !cooldownRetried ) {
+                        const waitMs = this.shortestActiveCooldownMs( attempts );
+                        if ( waitMs > 0 && waitMs <= OpenAIProxy.MAX_COOLDOWN_WAIT_MS ) {
+                            cooldownRetried = true;
+                            console.warn( `[ws:${endpoint}] All backends on cooldown (shortest ${waitMs}ms) — waiting then retrying ${modelName}` );
+                            await new Promise( resolve => setTimeout( resolve, waitMs + 100 ) );
+                            attemptIdx = 0;
+                            continue;
+                        }
+                    }
                     break;
                 }
             }
             if ( attemptIdx >= attempts.length ) break;
-            const { config, selectedModel } = attempts[attemptIdx]!;
+            const { config, selectedModel, isSibling } = attempts[attemptIdx]!;
             attemptIdx++;
-            const cooldownRemainingMs = backendCooldownManager.getRemainingMs( config.id, selectedModel );
+            // Sibling-pass attempts probe through provider-level cooldown
+            // (model-level cooldown still respected) — this is what makes
+            // hopping useful when a whole group is cooldowned.
+            const cooldownRemainingMs = isSibling
+                ? backendCooldownManager.getModelRemainingMs( config.id, selectedModel )
+                : backendCooldownManager.getRemainingMs( config.id, selectedModel );
                 if ( cooldownRemainingMs > 0 ) {
                     continue;
                 }
@@ -3312,6 +3373,7 @@ export class OpenAIProxy {
                     continue;
                 }
 
+                madeUpstreamAttempt = true;
                 try {
                     const url = this.buildApiUrl( config, endpoint );
                     const upstreamResponse = await fetchWithProxy( url, {

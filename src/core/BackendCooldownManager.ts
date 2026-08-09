@@ -114,6 +114,31 @@ export class BackendCooldownManager {
     }
 
     /**
+     * Model-level cooldown ONLY — skips the provider-level check. Used by the
+     * sibling-substitution pass: when a whole provider is in provider-level
+     * cooldown, hopping to a *different* model is still worth one probe. The
+     * provider cooldown was earned by repeated failures of specific models,
+     * and the sibling pass is the last-resort recovery path — a single probe
+     * of a fresh model costs nothing compared to dropping the request.
+     */
+    getModelRemainingMs( providerId: string, modelName: string ): number {
+        const key = this.buildKey( providerId, modelName );
+        const blockedUntil = this.blockedUntilByKey.get( key );
+
+        if ( typeof blockedUntil !== 'number' ) {
+            return 0;
+        }
+
+        const remainingMs = blockedUntil - Date.now();
+        if ( remainingMs <= 0 ) {
+            this.blockedUntilByKey.delete( key );
+            return 0;
+        }
+
+        return remainingMs;
+    }
+
+    /**
      * Returns a health score (0-100) for a provider, based on recent failure patterns.
      * 100 = perfectly healthy, 0 = completely degraded.
      */
