@@ -1,10 +1,15 @@
 /**
  * Anthropic-compatible /files route handlers.
+ *
+ * When a file is uploaded it is automatically attached to the default
+ * vector store so it becomes searchable via `file_search` without
+ * any explicit setup.
  */
 import type { Hono } from 'hono';
 import type { Context } from 'hono';
 import type { FileStore } from '../storage/FileStore';
 import type { FileRecord } from '../storage/types';
+import { attachFileToDefaultStore } from '../VectorStoreManager';
 
 interface Stores {
   fileStore: FileStore;
@@ -25,6 +30,18 @@ function toAnthropicFile( r: FileRecord ) {
     scope_id: r.scope_id ?? null,
     downloadable: r.downloadable ?? false,
   };
+}
+
+/** Optionally attach a file to the default vector store (fire-and-forget). */
+function attachToVectorStore( record: FileRecord ): void {
+  attachFileToDefaultStore( record.id, {
+    filename: record.filename,
+    purpose: record.purpose,
+    mime_type: record.mime_type,
+    downloadable: record.downloadable ?? false,
+  } ).catch( ( err: any ) => {
+    console.warn( `[fileRoutes] vector_store_attach_failed file=${record.id} error=${err?.message || String( err )}` );
+  } );
 }
 
 export function setupFileRoutes( app: Hono, stores: Stores ): void {
@@ -71,6 +88,7 @@ export function setupFileRoutes( app: Hono, stores: Stores ): void {
           content,
           downloadable,
         } );
+        attachToVectorStore( record );
         return c.json( toAnthropicFile( record ), 201 );
       } else {
         return c.json( { error: { message: 'Content-Type must be multipart/form-data', type: 'invalid_request_error' } }, 400 );

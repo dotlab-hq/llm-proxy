@@ -1656,6 +1656,21 @@ export class OpenAIProxy {
         };
     }
 
+    /**
+     * Extract a file_filter from a `file_search` tool definition.
+     * The OpenAI spec allows a `filter` field on `file_search` tools:
+     *   { type: 'file_search', filter: { key: 'file_id', value: '...', type: 'eq' } }
+     */
+    private extractFileFilterFromTools( body: any ): import( './FileSearchManager' ).FileFilter | undefined {
+        const tools = Array.isArray( body?.tools ) ? body.tools : [];
+        for ( const tool of tools ) {
+            if ( tool?.type === 'file_search' && tool?.filter ) {
+                return tool.filter;
+            }
+        }
+        return undefined;
+    }
+
     private async prepareFileSearchForResponses( body: any ): Promise<{
         body: any;
         searchCalls?: FileSearchCallItem[];
@@ -1694,8 +1709,11 @@ export class OpenAIProxy {
             20,
         );
 
+        // Extract file_filter from tools (used for attribute-based filtering)
+        const fileFilter = this.extractFileFilterFromTools( body );
+
         try {
-            const searchResponse = await fileSearchManager.search( queries, vectorStoreIds, { maxResults } );
+            const searchResponse = await fileSearchManager.search( queries, vectorStoreIds, { maxResults, fileFilter } );
             const searchCallId = `fs_${Date.now().toString( 36 )}`;
             const searchCall: FileSearchCallItem = {
                 id: searchCallId,
